@@ -703,7 +703,7 @@ function guidesEqual(a: AlignmentGuides, b: AlignmentGuides): boolean {
   return true;
 }
 
-export default function DiagramCanvas({
+function FlowchartDiagramCanvas({
   diagram,
   onNodeMove,
   onLayoutUpdate,
@@ -2871,4 +2871,369 @@ export default function DiagramCanvas({
       ) : null}
     </div>
   );
+}
+
+type GanttDragMode = "move" | "resize-start" | "resize-end" | "milestone";
+
+interface GanttTaskDraft {
+  startDay: number;
+  endDay: number;
+}
+
+interface GanttDragState {
+  taskId: string;
+  mode: GanttDragMode;
+  pointerStartX: number;
+  startDay: number;
+  endDay: number;
+}
+
+function GanttDiagramCanvas({
+  diagram,
+  onLayoutUpdate,
+  selectedNodeId,
+  onSelectNode,
+  onSelectEdge,
+  onDragStateChange,
+}: DiagramCanvasProps) {
+  const gantt = diagram.gantt;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [draftTasks, setDraftTasks] = useState<Record<string, GanttTaskDraft>>({});
+  const [dragState, setDragState] = useState<GanttDragState | null>(null);
+  const draftTasksRef = useRef<Record<string, GanttTaskDraft>>({});
+
+  useEffect(() => {
+    draftTasksRef.current = draftTasks;
+  }, [draftTasks]);
+
+  useEffect(() => {
+    setDraftTasks({});
+    setDragState(null);
+  }, [diagram.source]);
+
+  const effectiveTasks = useMemo(() => {
+    if (!gantt) {
+      return [];
+    }
+    return gantt.tasks.map((task) => {
+      const draft = draftTasks[task.id];
+      let startDay = draft?.startDay ?? task.startDay;
+      let endDay = draft?.endDay ?? task.endDay;
+      if (endDay <= startDay) {
+        endDay = startDay + 0.001;
+      }
+      return { ...task, startDay, endDay };
+    });
+  }, [gantt, draftTasks]);
+
+  const nodeById = useMemo(() => {
+    const map = new Map<string, DiagramData["nodes"][number]>();
+    for (const node of diagram.nodes) {
+      map.set(node.id, node);
+    }
+    return map;
+  }, [diagram.nodes]);
+
+  if (!gantt) {
+    return (
+      <div className="diagram-canvas">
+        <div className="placeholder">Invalid Gantt data</div>
+      </div>
+    );
+  }
+
+  const minDay = gantt.minDay;
+  const maxDay = Math.max(gantt.maxDay, minDay + 0.001);
+  const chartHeight = gantt.topMargin + gantt.rowHeight * Math.max(effectiveTasks.length, 1) + gantt.bottomMargin;
+  const chartWidth = gantt.sectionLabelWidth + gantt.timelineWidth + gantt.rightPadding;
+  const axisTop = gantt.topMargin - 10;
+  const axisBottom = gantt.topMargin + gantt.rowHeight * Math.max(effectiveTasks.length, 1);
+
+  const xForDay = useCallback((day: number): number => {
+    const ratio = Math.min(1, Math.max(0, (day - minDay) / (maxDay - minDay)));
+    return gantt.sectionLabelWidth + gantt.timelineWidth * ratio;
+  }, [gantt.sectionLabelWidth, gantt.timelineWidth, maxDay, minDay]);
+
+  const dayForClientX = useCallback((clientX: number): number => {
+    if (!svgRef.current) {
+      return minDay;
+    }
+    const rect = svgRef.current.getBoundingClientRect();
+    const localX = clientX - rect.left;
+    const clamped = Math.min(
+      gantt.sectionLabelWidth + gantt.timelineWidth,
+      Math.max(gantt.sectionLabelWidth, localX)
+    );
+    const ratio = (clamped - gantt.sectionLabelWidth) / gantt.timelineWidth;
+    return minDay + (maxDay - minDay) * ratio;
+  }, [gantt.sectionLabelWidth, gantt.timelineWidth, maxDay, minDay]);
+
+  const beginDrag = (
+    event: ReactPointerEvent<SVGElement>,
+    taskId: string,
+    mode: GanttDragMode,
+    startDay: number,
+    endDay: number
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectNode(taskId);
+    onSelectEdge(null);
+    setDragState({
+      taskId,
+      mode,
+      pointerStartX: event.clientX,
+      startDay,
+      endDay,
+    });
+    onDragStateChange?.(true);
+  };
+
+  useEffect(() => {
+    if (!dragState) {
+      return;
+    }
+
+    const epsilon = (maxDay - minDay) * 0.001;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const dxDay = dayForClientX(event.clientX) - dayForClientX(dragState.pointerStartX);
+      let nextStart = dragState.startDay;
+      let nextEnd = dragState.endDay;
+
+      if (dragState.mode === "move") {
+        nextStart = dragState.startDay + dxDay;
+        nextEnd = dragState.endDay + dxDay;
+      } else if (dragState.mode === "resize-start") {
+        nextStart = Math.min(dragState.startDay + dxDay, dragState.endDay - epsilon);
+      } else if (dragState.mode === "resize-end") {
+        nextEnd = Math.max(dragState.endDay + dxDay, dragState.startDay + epsilon);
+      } else {
+        nextStart = dragState.startDay + dxDay;
+        nextEnd = dragState.endDay + dxDay;
+      }
+
+      setDraftTasks((prev) => ({
+        ...prev,
+        [dragState.taskId]: {
+          startDay: nextStart,
+          endDay: nextEnd,
+        },
+      }));
+    };
+
+    const handlePointerUp = () => {
+      const finalDraft = draftTasksRef.current[dragState.taskId];
+      if (finalDraft && onLayoutUpdate) {
+        onLayoutUpdate({
+          ganttTasks: {
+            [dragState.taskId]: {
+              startDay: finalDraft.startDay,
+              endDay: finalDraft.endDay,
+            },
+          },
+        });
+      }
+      setDragState(null);
+      onDragStateChange?.(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [dayForClientX, dragState, maxDay, minDay, onDragStateChange, onLayoutUpdate]);
+
+  const ticks = 8;
+  const formattedTick = (day: number) => {
+    if (gantt.dateFormat.toUpperCase() === "HH:MM:SS") {
+      const totalSeconds = Math.max(0, Math.round((day - Math.floor(day)) * 86400));
+      const h = Math.floor(totalSeconds / 3600) % 24;
+      const m = Math.floor(totalSeconds / 60) % 60;
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    }
+    return day.toFixed(2);
+  };
+
+  const occupiedRects: Array<{ x: number; y: number; width: number; height: number }> = effectiveTasks.map((task) => {
+    const rowTop = gantt.topMargin + task.rowIndex * gantt.rowHeight;
+    const barY = rowTop + (gantt.rowHeight - gantt.barHeight) / 2;
+    const startX = xForDay(task.startDay);
+    const endX = xForDay(task.endDay);
+    const width = Math.max(8, endX - startX);
+    return { x: startX, y: barY, width, height: gantt.barHeight };
+  });
+  const intersects = (a: { x: number; y: number; width: number; height: number }) =>
+    occupiedRects.some((b) => !(a.x + a.width < b.x || b.x + b.width < a.x || a.y + a.height < b.y || b.y + b.height < a.y));
+
+  return (
+    <div className="diagram-canvas" onPointerDown={() => { onSelectNode(null); onSelectEdge(null); }}>
+      <svg ref={svgRef} viewBox={`0 0 ${chartWidth} ${chartHeight}`} style={{ width: "100%", height: "100%" }}>
+        <rect x={0} y={0} width={chartWidth} height={chartHeight} fill={diagram.background} />
+        {gantt.title ? (
+          <text x={chartWidth / 2} y={36} fill="#1a202c" fontSize={20} fontWeight={700} textAnchor="middle">
+            {gantt.title}
+          </text>
+        ) : null}
+
+        {effectiveTasks.map((task) => {
+          const rowTop = gantt.topMargin + task.rowIndex * gantt.rowHeight;
+          return (
+            <rect
+              key={`row-${task.id}`}
+              x={gantt.sectionLabelWidth}
+              y={rowTop}
+              width={gantt.timelineWidth}
+              height={gantt.rowHeight}
+              fill={task.rowIndex % 2 === 0 ? gantt.style.rowFillEven : gantt.style.rowFillOdd}
+            />
+          );
+        })}
+
+        {gantt.sections.map((section, idx) => {
+          const sectionRows = effectiveTasks.filter((task) => task.sectionIndex === idx);
+          if (sectionRows.length === 0) {
+            return null;
+          }
+          const top = gantt.topMargin + Math.min(...sectionRows.map((task) => task.rowIndex)) * gantt.rowHeight;
+          const bottom = gantt.topMargin + (Math.max(...sectionRows.map((task) => task.rowIndex)) + 1) * gantt.rowHeight;
+          return (
+            <g key={`section-${idx}`}>
+              <rect
+                x={0}
+                y={top}
+                width={gantt.sectionLabelWidth}
+                height={bottom - top}
+                fill={idx % 2 === 0 ? gantt.style.rowFillEven : gantt.style.rowFillOdd}
+              />
+              <text x={14} y={(top + bottom) / 2} fill="#1f2937" fontSize={14} fontWeight={600} dominantBaseline="middle">
+                {section}
+              </text>
+            </g>
+          );
+        })}
+
+        {Array.from({ length: ticks + 1 }).map((_, idx) => {
+          const ratio = idx / ticks;
+          const x = gantt.sectionLabelWidth + gantt.timelineWidth * ratio;
+          const day = minDay + (maxDay - minDay) * ratio;
+          return (
+            <g key={`tick-${idx}`}>
+              <line x1={x} y1={axisTop} x2={x} y2={axisBottom} stroke="#cbd5e1" strokeWidth={1} />
+              <text x={x} y={axisBottom + 24} fill="#64748b" fontSize={12} textAnchor="middle">
+                {formattedTick(day)}
+              </text>
+            </g>
+          );
+        })}
+
+        {effectiveTasks.map((task) => {
+          const rowTop = gantt.topMargin + task.rowIndex * gantt.rowHeight;
+          const barY = rowTop + (gantt.rowHeight - gantt.barHeight) / 2;
+          const startX = xForDay(task.startDay);
+          const endX = xForDay(task.endDay);
+          const width = Math.max(8, endX - startX);
+          const nodeStyle = nodeById.get(task.id);
+          const fillColor = nodeStyle?.fillColor ?? (task.milestone ? gantt.style.milestoneFill : gantt.style.taskFill);
+          const textColor = nodeStyle?.textColor ?? (task.milestone ? gantt.style.milestoneText : gantt.style.taskText);
+          const strokeColor = nodeStyle?.strokeColor ?? "#ffffff";
+          const isSelected = selectedNodeId === task.id;
+
+          if (task.milestone) {
+            const cx = startX + width / 2;
+            const cy = barY + gantt.barHeight / 2;
+            const half = gantt.barHeight * 0.46;
+            const textWidth = Math.max(24, task.label.length * 7.1);
+            const candidates = [
+              { x: cx + half + 8, y: cy, anchor: "start" as const },
+              { x: cx - half - 8, y: cy, anchor: "end" as const },
+              { x: cx, y: cy - half - 10, anchor: "middle" as const },
+              { x: cx, y: cy + half + 12, anchor: "middle" as const },
+            ];
+
+            let choice = candidates[0];
+            for (const candidate of candidates) {
+              const left = candidate.anchor === "start"
+                ? candidate.x
+                : candidate.anchor === "end"
+                  ? candidate.x - textWidth
+                  : candidate.x - textWidth / 2;
+              const rect = { x: left, y: candidate.y - 8, width: textWidth, height: 16 };
+              const inside = rect.x >= 4 && rect.x + rect.width <= chartWidth - 4 && rect.y >= 4 && rect.y + rect.height <= chartHeight - 4;
+              if (inside && !intersects(rect)) {
+                choice = candidate;
+                occupiedRects.push(rect);
+                break;
+              }
+            }
+
+            return (
+              <g key={task.id}>
+                <polygon
+                  points={`${cx},${cy - half} ${cx + half},${cy} ${cx},${cy + half} ${cx - half},${cy}`}
+                  fill={fillColor}
+                  stroke={strokeColor}
+                  strokeWidth={isSelected ? 3 : 2}
+                  onPointerDown={(event) => beginDrag(event, task.id, "milestone", task.startDay, task.endDay)}
+                />
+                <text x={choice.x} y={choice.y} fill={textColor} fontSize={13} textAnchor={choice.anchor} dominantBaseline="middle">
+                  {task.label}
+                </text>
+              </g>
+            );
+          }
+
+          return (
+            <g key={task.id}>
+              <rect
+                x={startX}
+                y={barY}
+                width={width}
+                height={gantt.barHeight}
+                rx={4}
+                ry={4}
+                fill={fillColor}
+                stroke={strokeColor}
+                strokeWidth={isSelected ? 3 : 2}
+                onPointerDown={(event) => beginDrag(event, task.id, "move", task.startDay, task.endDay)}
+              />
+              <rect
+                x={startX - 4}
+                y={barY - 2}
+                width={8}
+                height={gantt.barHeight + 4}
+                fill="#111827"
+                opacity={0.75}
+                cursor="ew-resize"
+                onPointerDown={(event) => beginDrag(event, task.id, "resize-start", task.startDay, task.endDay)}
+              />
+              <rect
+                x={startX + width - 4}
+                y={barY - 2}
+                width={8}
+                height={gantt.barHeight + 4}
+                fill="#111827"
+                opacity={0.75}
+                cursor="ew-resize"
+                onPointerDown={(event) => beginDrag(event, task.id, "resize-end", task.startDay, task.endDay)}
+              />
+              <text x={startX + width / 2} y={barY + gantt.barHeight / 2} fill={textColor} fontSize={13} textAnchor="middle" dominantBaseline="middle" pointerEvents="none">
+                {task.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+export default function DiagramCanvas(props: DiagramCanvasProps) {
+  if (props.diagram.kind === "gantt" && props.diagram.gantt) {
+    return <GanttDiagramCanvas {...props} />;
+  }
+  return <FlowchartDiagramCanvas {...props} />;
 }

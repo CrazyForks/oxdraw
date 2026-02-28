@@ -85,6 +85,38 @@ pub struct EdgeStyleOverride {
     pub arrow: Option<EdgeArrowDirection>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GanttTaskOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_day: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_day: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GanttStyleOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_fill_even: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_fill_odd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_fill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub milestone_fill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub milestone_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GanttOverrides {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tasks: HashMap<String, GanttTaskOverride>,
+    #[serde(default, skip_serializing_if = "GanttStyleOverride::is_empty")]
+    pub style: GanttStyleOverride,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Direction {
     TopDown,
@@ -214,6 +246,22 @@ pub struct NodeStylePatch {
     pub image_fill: Option<Option<String>>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct GanttStylePatch {
+    #[serde(default)]
+    pub row_fill_even: Option<Option<String>>,
+    #[serde(default)]
+    pub row_fill_odd: Option<Option<String>>,
+    #[serde(default)]
+    pub task_fill: Option<Option<String>>,
+    #[serde(default)]
+    pub milestone_fill: Option<Option<String>>,
+    #[serde(default)]
+    pub milestone_text: Option<Option<String>>,
+    #[serde(default)]
+    pub task_text: Option<Option<String>>,
+}
+
 impl NodeStyleOverride {
     pub fn is_empty(&self) -> bool {
         self.fill.is_none()
@@ -227,6 +275,29 @@ impl NodeStyleOverride {
 impl EdgeStyleOverride {
     pub fn is_empty(&self) -> bool {
         self.line.is_none() && self.color.is_none() && self.arrow.is_none()
+    }
+}
+
+impl GanttTaskOverride {
+    pub fn is_empty(&self) -> bool {
+        self.start_day.is_none() && self.end_day.is_none()
+    }
+}
+
+impl GanttStyleOverride {
+    pub fn is_empty(&self) -> bool {
+        self.row_fill_even.is_none()
+            && self.row_fill_odd.is_none()
+            && self.task_fill.is_none()
+            && self.milestone_fill.is_none()
+            && self.milestone_text.is_none()
+            && self.task_text.is_none()
+    }
+}
+
+impl GanttOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty() && self.style.is_empty()
     }
 }
 

@@ -255,8 +255,12 @@ pub async fn run_render_or_edit(cli: RenderArgs) -> Result<()> {
     if let Some(input_path) = cli.input.clone() {
         let path = PathBuf::from(&input_path);
         if path.extension().and_then(|s| s.to_str()) == Some("md") && path.exists() {
-            // If the user didn't explicitly specify what to do, assume they want to view the codedown
-            if cli.codedown.is_none() && cli.augment_markdown.is_none() {
+            // If the user didn't explicitly specify what to do, auto-open only when this markdown
+            // already contains oxdraw codedown mappings.
+            if cli.codedown.is_none()
+                && cli.augment_markdown.is_none()
+                && markdown_has_oxdraw_mappings(&path)
+            {
                 #[cfg(feature = "server")]
                 {
                     #[cfg(not(target_arch = "wasm32"))]
@@ -1311,4 +1315,10 @@ fn write_output(dest: OutputDestination, bytes: &[u8], quiet: bool) -> Result<()
         }
     }
     Ok(())
+}
+
+fn markdown_has_oxdraw_mappings(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|source| source.contains("<!-- OXDRAW MAPPING"))
+        .unwrap_or(false)
 }

@@ -277,6 +277,9 @@ const resolveColor = (value: string | null | undefined, fallback: string): strin
 
 const normalizeColorInput = (value: string): string => value.trim().toLowerCase();
 
+const hasCodeAnnotations = (source: string): boolean =>
+  /^\s*%%\s*OXDRAW CODE\b/m.test(source);
+
 export default function Home() {
   const [diagram, setDiagram] = useState<DiagramData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -292,6 +295,7 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [codeMapMapping, setCodeMapMapping] = useState<CodeMapMapping | null>(null);
   const [codeMapMode, setCodeMapMode] = useState(false);
+  const [isCodeAnnotated, setIsCodeAnnotated] = useState(false);
   const [codedownMode, setCodedownMode] = useState(false);
   const [markdownContent, setMarkdownContent] = useState<string>("");
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string } | null>(null);
@@ -338,7 +342,7 @@ export default function Home() {
         setLeftPanelWidth(Math.max(200, Math.min(e.clientX, 600)));
       } else if (isRightPanelResizing) {
         const newWidth = document.body.clientWidth - e.clientX;
-        setRightPanelWidth(Math.max(300, Math.min(newWidth, 800)));
+        setRightPanelWidth(Math.max(300, newWidth));
       }
     };
 
@@ -397,6 +401,12 @@ const loadDiagram = useCallback(
       lastSubmittedSource.current = data.source;
       setSourceError(null);
       setSourceSaving(false);
+      const annotated = hasCodeAnnotations(data.source);
+      setIsCodeAnnotated(annotated);
+      if (!annotated) {
+        setCodeMapMode(false);
+        setCodeMapMapping(null);
+      }
 
       if (data.sourcePath.endsWith('.md')) {
         setCodedownMode(true);
@@ -428,15 +438,23 @@ const loadDiagram = useCallback(
 );
 
 useEffect(() => {
-  void loadDiagram().catch(() => undefined);
-  fetchCodeMapMapping().then((mapping) => {
-    if (mapping) {
-      setCodeMapMapping(mapping);
-      setCodeMapMode(true);
-    }
-  }).catch(() => {
-    // Ignore error, likely not in code map mode
-  });
+  void loadDiagram()
+    .then((data) => {
+      if (!hasCodeAnnotations(data.source)) {
+        setCodeMapMapping(null);
+        setCodeMapMode(false);
+        return;
+      }
+      fetchCodeMapMapping()
+        .then((mapping) => {
+          setCodeMapMapping(mapping);
+        })
+        .catch(() => {
+          setCodeMapMapping(null);
+          setCodeMapMode(false);
+        });
+    })
+    .catch(() => undefined);
 }, [loadDiagram]);
 
 useEffect(() => {
@@ -480,10 +498,19 @@ const submitStyleUpdate = useCallback(
   async (update: {
     nodeStyles?: Record<string, NodeStyleUpdate | null>;
     edgeStyles?: Record<string, EdgeStyleUpdate | null>;
+    ganttStyle?: {
+      rowFillEven?: string | null;
+      rowFillOdd?: string | null;
+      taskFill?: string | null;
+      milestoneFill?: string | null;
+      taskText?: string | null;
+      milestoneText?: string | null;
+    };
   }) => {
     const hasNodeStyles = update.nodeStyles && Object.keys(update.nodeStyles).length > 0;
     const hasEdgeStyles = update.edgeStyles && Object.keys(update.edgeStyles).length > 0;
-    if (!hasNodeStyles && !hasEdgeStyles) {
+    const hasGanttStyle = update.ganttStyle && Object.keys(update.ganttStyle).length > 0;
+    if (!hasNodeStyles && !hasEdgeStyles && !hasGanttStyle) {
       return;
     }
 
@@ -493,6 +520,7 @@ const submitStyleUpdate = useCallback(
       await updateStyle({
         nodeStyles: update.nodeStyles,
         edgeStyles: update.edgeStyles,
+        ganttStyle: update.ganttStyle,
       });
       await loadDiagram({ silent: true });
     } catch (err) {
@@ -502,6 +530,28 @@ const submitStyleUpdate = useCallback(
     }
   },
   [loadDiagram]
+);
+
+const handleGanttStyleChange = useCallback(
+  (
+    key: "rowFillEven" | "rowFillOdd" | "taskFill" | "milestoneFill" | "taskText" | "milestoneText",
+    value: string
+  ) => {
+    if (!diagram || diagram.kind !== "gantt" || !diagram.gantt) {
+      return;
+    }
+    const normalized = normalizeColorInput(value);
+    const currentValue = normalizeColorInput(diagram.gantt.style[key]);
+    if (normalized === currentValue) {
+      return;
+    }
+    void submitStyleUpdate({
+      ganttStyle: {
+        [key]: normalized,
+      },
+    });
+  },
+  [diagram, submitStyleUpdate]
 );
 
 const handleNodeFillChange = useCallback(
@@ -914,7 +964,8 @@ const handleLayoutUpdate = useCallback(
   (update: LayoutUpdate) => {
     const hasNodes = update.nodes && Object.keys(update.nodes).length > 0;
     const hasEdges = update.edges && Object.keys(update.edges).length > 0;
-    if (!hasNodes && !hasEdges) {
+    const hasGanttTasks = update.ganttTasks && Object.keys(update.ganttTasks).length > 0;
+    if (!hasNodes && !hasEdges && !hasGanttTasks) {
       return;
     }
     void applyUpdate(update);
@@ -1291,13 +1342,20 @@ const selectionLabel = useMemo(() => {
 }, [selectedEdgeId, selectedNodeId]);
 
 const hasSelection = selectedNodeId !== null || selectedEdgeId !== null;
+const ganttStyle = diagram?.kind === "gantt" ? diagram.gantt?.style : null;
 
 const nodeFillValue = useMemo(() => {
   if (!selectedNode) {
-    return DEFAULT_NODE_COLORS.rectangle.toLowerCase();
+    return (ganttStyle?.taskFill ?? DEFAULT_NODE_COLORS.rectangle).toLowerCase();
   }
-  return resolveColor(selectedNode.fillColor, DEFAULT_NODE_COLORS[selectedNode.shape]);
-}, [selectedNode]);
+  const ganttFallback = selectedNode.shape === "double-circle"
+    ? ganttStyle?.milestoneFill
+    : ganttStyle?.taskFill;
+  return resolveColor(
+    selectedNode.fillColor,
+    ganttFallback ?? DEFAULT_NODE_COLORS[selectedNode.shape]
+  );
+}, [ganttStyle, selectedNode]);
 
 const nodeStrokeValue = useMemo(() => {
   if (!selectedNode) {
@@ -1308,10 +1366,37 @@ const nodeStrokeValue = useMemo(() => {
 
 const nodeTextValue = useMemo(() => {
   if (!selectedNode) {
-    return DEFAULT_NODE_TEXT.toLowerCase();
+    return (ganttStyle?.taskText ?? DEFAULT_NODE_TEXT).toLowerCase();
   }
-  return resolveColor(selectedNode.textColor, DEFAULT_NODE_TEXT);
-}, [selectedNode]);
+  const ganttFallback = selectedNode.shape === "double-circle"
+    ? ganttStyle?.milestoneText
+    : ganttStyle?.taskText;
+  return resolveColor(selectedNode.textColor, ganttFallback ?? DEFAULT_NODE_TEXT);
+}, [ganttStyle, selectedNode]);
+
+const ganttRowEvenValue = useMemo(() => {
+  return resolveColor(ganttStyle?.rowFillEven, "#eff6ff");
+}, [ganttStyle?.rowFillEven]);
+
+const ganttRowOddValue = useMemo(() => {
+  return resolveColor(ganttStyle?.rowFillOdd, "#dbeafe");
+}, [ganttStyle?.rowFillOdd]);
+
+const ganttTaskFillValue = useMemo(() => {
+  return resolveColor(ganttStyle?.taskFill, "#2563eb");
+}, [ganttStyle?.taskFill]);
+
+const ganttMilestoneFillValue = useMemo(() => {
+  return resolveColor(ganttStyle?.milestoneFill, "#1d4ed8");
+}, [ganttStyle?.milestoneFill]);
+
+const ganttTaskTextValue = useMemo(() => {
+  return resolveColor(ganttStyle?.taskText, "#ffffff");
+}, [ganttStyle?.taskText]);
+
+const ganttMilestoneTextValue = useMemo(() => {
+  return resolveColor(ganttStyle?.milestoneText, "#111827");
+}, [ganttStyle?.milestoneText]);
 
 const nodeLabelFillValue = useMemo(() => {
   if (!selectedNode) {
@@ -1406,9 +1491,9 @@ return (
         <button onClick={toggleTheme} title="Toggle Theme">
           {theme === "light" ? "Dark Mode" : "Light Mode"}
         </button>
-        {codeMapMapping && (
+        {isCodeAnnotated && codeMapMapping && (
           <button
-            onClick={() => setCodeMapMode(!codeMapMode)}
+            onClick={() => setCodeMapMode((current) => !current)}
             title="Toggle Code Map Mode"
           >
             {codeMapMode ? "Edit Diagram" : "View Code Map"}
@@ -1467,6 +1552,72 @@ return (
                   </span>
                 </div>
                 <div className="panel-body">
+                {diagram.kind === "gantt" && diagram.gantt ? (
+                  <section className="style-section">
+                    <header className="section-heading">
+                      <h3>Gantt</h3>
+                      <span className="section-caption">Timeline styles</span>
+                    </header>
+                    <div className="style-controls">
+                      <div className="style-color-row">
+                        <label className="style-control">
+                          <span>Row even</span>
+                          <input
+                            type="color"
+                            value={ganttRowEvenValue}
+                            onChange={(event) => handleGanttStyleChange("rowFillEven", event.target.value)}
+                            disabled={saving}
+                          />
+                        </label>
+                        <label className="style-control">
+                          <span>Row odd</span>
+                          <input
+                            type="color"
+                            value={ganttRowOddValue}
+                            onChange={(event) => handleGanttStyleChange("rowFillOdd", event.target.value)}
+                            disabled={saving}
+                          />
+                        </label>
+                        <label className="style-control">
+                          <span>Task fill</span>
+                          <input
+                            type="color"
+                            value={ganttTaskFillValue}
+                            onChange={(event) => handleGanttStyleChange("taskFill", event.target.value)}
+                            disabled={saving}
+                          />
+                        </label>
+                        <label className="style-control">
+                          <span>Task text</span>
+                          <input
+                            type="color"
+                            value={ganttTaskTextValue}
+                            onChange={(event) => handleGanttStyleChange("taskText", event.target.value)}
+                            disabled={saving}
+                          />
+                        </label>
+                        <label className="style-control">
+                          <span>Milestone fill</span>
+                          <input
+                            type="color"
+                            value={ganttMilestoneFillValue}
+                            onChange={(event) => handleGanttStyleChange("milestoneFill", event.target.value)}
+                            disabled={saving}
+                          />
+                        </label>
+                        <label className="style-control">
+                          <span>Milestone text</span>
+                          <input
+                            type="color"
+                            value={ganttMilestoneTextValue}
+                            onChange={(event) => handleGanttStyleChange("milestoneText", event.target.value)}
+                            disabled={saving}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  </section>
+                ) : null}
                 <section className="style-section">
                   <header className="section-heading">
                     <h3>Node</h3>

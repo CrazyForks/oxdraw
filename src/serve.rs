@@ -78,6 +78,7 @@ struct ServeState {
 #[serde(rename_all = "camelCase")]
 struct DiagramPayload {
     source_path: String,
+    kind: String,
     background: String,
     auto_size: CanvasSize,
     render_size: CanvasSize,
@@ -85,7 +86,51 @@ struct DiagramPayload {
     edges: Vec<EdgePayload>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     subgraphs: Vec<SubgraphPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gantt: Option<GanttPayload>,
     source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GanttPayload {
+    date_format: String,
+    title: Option<String>,
+    min_day: f64,
+    max_day: f64,
+    section_label_width: f32,
+    timeline_width: f32,
+    top_margin: f32,
+    row_height: f32,
+    bar_height: f32,
+    right_padding: f32,
+    bottom_margin: f32,
+    sections: Vec<String>,
+    tasks: Vec<GanttTaskPayload>,
+    style: GanttStylePayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GanttTaskPayload {
+    id: String,
+    label: String,
+    section_index: usize,
+    row_index: usize,
+    start_day: f64,
+    end_day: f64,
+    milestone: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GanttStylePayload {
+    row_fill_even: String,
+    row_fill_odd: String,
+    task_fill: String,
+    milestone_fill: String,
+    task_text: String,
+    milestone_text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +212,16 @@ struct LayoutUpdate {
     nodes: HashMap<String, Option<Point>>,
     #[serde(default)]
     edges: HashMap<String, Option<EdgeOverride>>,
+    #[serde(default)]
+    gantt_tasks: HashMap<String, Option<GanttTaskLayoutUpdate>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GanttTaskLayoutUpdate {
+    #[serde(default)]
+    start_day: Option<f64>,
+    #[serde(default)]
+    end_day: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +235,8 @@ struct StyleUpdate {
     node_styles: HashMap<String, Option<NodeStylePatch>>,
     #[serde(default)]
     edge_styles: HashMap<String, Option<EdgeStylePatch>>,
+    #[serde(default)]
+    gantt_style: Option<GanttStylePatch>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +277,7 @@ impl ServeState {
                         },
                     );
                     Diagram {
+                        kind: DiagramKind::Flowchart,
                         direction: Direction::TopDown,
                         nodes,
                         order: vec!["dummy".to_string()],
@@ -240,35 +298,96 @@ impl ServeState {
     }
 
     async fn apply_update(&self, update: LayoutUpdate) -> Result<()> {
+        let LayoutUpdate {
+            nodes,
+            edges,
+            gantt_tasks,
+        } = update;
+
+        if !gantt_tasks.is_empty() {
+            self.apply_gantt_task_updates(&gantt_tasks).await?;
+        }
+
+        if nodes.is_empty() && edges.is_empty() {
+            return Ok(());
+        }
+
         let snapshot = {
             let mut overrides = self.overrides.write().await;
+            let mut changed = false;
 
-            for (id, value) in update.nodes {
+            for (id, value) in nodes {
                 match value {
                     Some(point) => {
                         overrides.nodes.insert(id, point);
+                        changed = true;
                     }
                     None => {
-                        overrides.nodes.remove(&id);
+                        if overrides.nodes.remove(&id).is_some() {
+                            changed = true;
+                        }
                     }
                 }
             }
 
-            for (id, value) in update.edges {
+            for (id, value) in edges {
                 match value {
                     Some(edge_override) if !edge_override.points.is_empty() => {
                         overrides.edges.insert(id, edge_override);
+                        changed = true;
                     }
                     _ => {
-                        overrides.edges.remove(&id);
+                        if overrides.edges.remove(&id).is_some() {
+                            changed = true;
+                        }
                     }
                 }
             }
 
+            if !changed {
+                None
+            } else {
+                Some(overrides.clone())
+            }
+        };
+
+        if let Some(snapshot) = snapshot {
+            self.rewrite_file_with_overrides(&snapshot).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn apply_gantt_task_updates(
+        &self,
+        gantt_tasks: &HashMap<String, Option<GanttTaskLayoutUpdate>>,
+    ) -> Result<()> {
+        let _guard = self.source_lock.lock().await;
+        let contents = tokio::fs::read_to_string(&self.source_path)
+            .await
+            .with_context(|| format!("failed to read '{}'", self.source_path.display()))?;
+        let (definition, _) = split_source_and_overrides(&contents)?;
+        let diagram = Diagram::parse(&definition)?;
+        let DiagramKind::Gantt(gantt) = &diagram.kind else {
+            return Ok(());
+        };
+
+        let rewritten = rewrite_gantt_task_lines(&definition, gantt, gantt_tasks);
+
+        let snapshot = {
+            let mut overrides = self.overrides.write().await;
+            for id in gantt_tasks.keys() {
+                overrides.gantt.tasks.remove(id);
+                overrides.nodes.remove(id);
+            }
             overrides.clone()
         };
 
-        self.rewrite_file_with_overrides(&snapshot).await
+        let merged = merge_source_and_overrides(&rewritten, &snapshot)?;
+        tokio::fs::write(&self.source_path, merged.as_bytes())
+            .await
+            .with_context(|| format!("failed to write '{}'", self.source_path.display()))?;
+        Ok(())
     }
 
     async fn apply_style_update(&self, update: StyleUpdate) -> Result<()> {
@@ -332,6 +451,27 @@ impl ServeState {
                     None => {
                         overrides.edge_styles.remove(&id);
                     }
+                }
+            }
+
+            if let Some(patch) = update.gantt_style {
+                if let Some(value) = patch.row_fill_even {
+                    overrides.gantt.style.row_fill_even = value;
+                }
+                if let Some(value) = patch.row_fill_odd {
+                    overrides.gantt.style.row_fill_odd = value;
+                }
+                if let Some(value) = patch.task_fill {
+                    overrides.gantt.style.task_fill = value;
+                }
+                if let Some(value) = patch.milestone_fill {
+                    overrides.gantt.style.milestone_fill = value;
+                }
+                if let Some(value) = patch.milestone_text {
+                    overrides.gantt.style.milestone_text = value;
+                }
+                if let Some(value) = patch.task_text {
+                    overrides.gantt.style.task_text = value;
                 }
             }
 
@@ -766,8 +906,108 @@ async fn get_diagram(
         });
     }
 
+    let (kind, gantt_payload) = match &diagram.kind {
+        DiagramKind::Flowchart => ("flowchart".to_string(), None),
+        DiagramKind::Gantt(gantt) => {
+            let gantt_overrides = &overrides.gantt;
+            let row_fill_even = gantt_overrides
+                .style
+                .row_fill_even
+                .clone()
+                .unwrap_or_else(|| "#eff6ff".to_string());
+            let row_fill_odd = gantt_overrides
+                .style
+                .row_fill_odd
+                .clone()
+                .unwrap_or_else(|| "#dbeafe".to_string());
+            let task_fill = gantt_overrides
+                .style
+                .task_fill
+                .clone()
+                .unwrap_or_else(|| "#2563eb".to_string());
+            let milestone_fill = gantt_overrides
+                .style
+                .milestone_fill
+                .clone()
+                .unwrap_or_else(|| "#1d4ed8".to_string());
+            let task_text = gantt_overrides
+                .style
+                .task_text
+                .clone()
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let milestone_text = gantt_overrides
+                .style
+                .milestone_text
+                .clone()
+                .unwrap_or_else(|| "#111827".to_string());
+
+            let mut min_day = f64::INFINITY;
+            let mut max_day = f64::NEG_INFINITY;
+            let mut tasks = Vec::with_capacity(gantt.tasks.len());
+
+            for (row_index, task) in gantt.tasks.iter().enumerate() {
+                let task_override = gantt_overrides.tasks.get(&task.id);
+                let start_day = task_override
+                    .and_then(|entry| entry.start_day)
+                    .unwrap_or(task.start_day);
+                let mut end_day = task_override
+                    .and_then(|entry| entry.end_day)
+                    .unwrap_or(task.end_day);
+                if end_day <= start_day {
+                    end_day = start_day + 0.001;
+                }
+
+                min_day = min_day.min(start_day);
+                max_day = max_day.max(end_day);
+
+                tasks.push(GanttTaskPayload {
+                    id: task.id.clone(),
+                    label: task.label.clone(),
+                    section_index: task.section_index,
+                    row_index,
+                    start_day,
+                    end_day,
+                    milestone: task.milestone,
+                });
+            }
+
+            if !min_day.is_finite() || !max_day.is_finite() || max_day <= min_day {
+                min_day = 0.0;
+                max_day = 1.0;
+            }
+
+            (
+                "gantt".to_string(),
+                Some(GanttPayload {
+                    date_format: gantt.date_format.clone(),
+                    title: gantt.title.clone(),
+                    min_day,
+                    max_day,
+                    section_label_width: 160.0,
+                    timeline_width: 1200.0,
+                    top_margin: 68.0,
+                    row_height: 40.0,
+                    bar_height: 20.0,
+                    right_padding: 40.0,
+                    bottom_margin: 80.0,
+                    sections: gantt.sections.clone(),
+                    tasks,
+                    style: GanttStylePayload {
+                        row_fill_even,
+                        row_fill_odd,
+                        task_fill,
+                        milestone_fill,
+                        task_text,
+                        milestone_text,
+                    },
+                }),
+            )
+        }
+    };
+
     let payload = DiagramPayload {
         source_path: state.source_path.display().to_string(),
+        kind,
         background: state.background.clone(),
         auto_size: layout.auto_size,
         render_size: CanvasSize {
@@ -777,6 +1017,7 @@ async fn get_diagram(
         nodes,
         edges,
         subgraphs,
+        gantt: gantt_payload,
         source,
     };
 
@@ -872,6 +1113,179 @@ async fn delete_edge(
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+}
+
+fn rewrite_gantt_task_lines(
+    definition: &str,
+    gantt: &GanttData,
+    gantt_tasks: &HashMap<String, Option<GanttTaskLayoutUpdate>>,
+) -> String {
+    if gantt_tasks.is_empty() {
+        return definition.to_string();
+    }
+
+    let mut lines: Vec<String> = definition.lines().map(ToString::to_string).collect();
+    let mut task_by_id: HashMap<&str, &GanttTask> = HashMap::new();
+    let mut task_index_by_id: HashMap<&str, usize> = HashMap::new();
+    for task in &gantt.tasks {
+        task_by_id.insert(task.id.as_str(), task);
+    }
+    for (idx, task) in gantt.tasks.iter().enumerate() {
+        task_index_by_id.insert(task.id.as_str(), idx);
+    }
+
+    let task_line_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("%%") || trimmed.starts_with("section ") {
+                return None;
+            }
+            if trimmed.trim_end_matches(';').contains(':') {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (task_id, patch_opt) in gantt_tasks {
+        let Some(patch) = patch_opt else {
+            continue;
+        };
+        let Some(task) = task_by_id.get(task_id.as_str()) else {
+            continue;
+        };
+
+        let start_day = patch.start_day.unwrap_or(task.start_day);
+        let mut end_day = patch.end_day.unwrap_or(task.end_day);
+        if end_day < start_day {
+            end_day = start_day;
+        }
+
+        let start_text = format_gantt_day(start_day, &gantt.date_format);
+        let end_text = if task.milestone {
+            "0d".to_string()
+        } else {
+            format_gantt_day(end_day, &gantt.date_format)
+        };
+
+        let mut replaced = false;
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("%%") || trimmed.starts_with("section ") {
+                continue;
+            }
+
+            let had_semicolon = trimmed.ends_with(';');
+            let normalized = trimmed.trim_end_matches(';').trim();
+            let Some((title_part, metadata_part)) = normalized.split_once(':') else {
+                continue;
+            };
+
+            let metadata_tokens: Vec<String> = metadata_part
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(ToString::to_string)
+                .collect();
+
+            if !metadata_tokens.iter().any(|token| token == task_id) {
+                continue;
+            }
+
+            let mut tags = Vec::new();
+            let mut idx = 0_usize;
+            while idx < metadata_tokens.len() {
+                let lower = metadata_tokens[idx].to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "active" | "done" | "crit" | "milestone" | "milestore" | "vert"
+                ) {
+                    tags.push(metadata_tokens[idx].clone());
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+            let mut new_meta = Vec::new();
+            new_meta.extend(tags);
+            new_meta.push(task_id.to_string());
+            new_meta.push(start_text.clone());
+            new_meta.push(end_text.clone());
+
+            let indent_len = line.len().saturating_sub(line.trim_start().len());
+            let indent = &line[..indent_len];
+            let mut rebuilt = format!("{indent}{}: {}", title_part.trim_end(), new_meta.join(", "));
+            if had_semicolon {
+                rebuilt.push(';');
+            }
+            *line = rebuilt;
+            replaced = true;
+            break;
+        }
+
+        if !replaced {
+            let Some(task_index) = task_index_by_id.get(task_id.as_str()).copied() else {
+                continue;
+            };
+            let Some(line_index) = task_line_indices.get(task_index).copied() else {
+                continue;
+            };
+            let original = &lines[line_index];
+            let trimmed = original.trim();
+            let had_semicolon = trimmed.ends_with(';');
+            let normalized = trimmed.trim_end_matches(';').trim();
+            let Some((title_part, metadata_part)) = normalized.split_once(':') else {
+                continue;
+            };
+            let metadata_tokens: Vec<String> = metadata_part
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(ToString::to_string)
+                .collect();
+
+            let mut tags = Vec::new();
+            let mut idx = 0_usize;
+            while idx < metadata_tokens.len() {
+                let lower = metadata_tokens[idx].to_ascii_lowercase();
+                if matches!(
+                    lower.as_str(),
+                    "active" | "done" | "crit" | "milestone" | "milestore" | "vert"
+                ) {
+                    tags.push(metadata_tokens[idx].clone());
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+            let mut new_meta = Vec::new();
+            new_meta.extend(tags);
+            if !task_id.starts_with("task_") {
+                new_meta.push(task_id.to_string());
+            }
+            new_meta.push(start_text.clone());
+            new_meta.push(end_text.clone());
+
+            let indent_len = original.len().saturating_sub(original.trim_start().len());
+            let indent = &original[..indent_len];
+            let mut rebuilt = format!("{indent}{}: {}", title_part.trim_end(), new_meta.join(", "));
+            if had_semicolon {
+                rebuilt.push(';');
+            }
+            lines[line_index] = rebuilt;
+        }
+    }
+
+    let mut output = lines.join("\n");
+    if definition.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 async fn put_node_image(
@@ -973,11 +1387,15 @@ fn merge_source_and_overrides(definition: &str, overrides: &LayoutOverrides) -> 
         return Ok(output);
     }
 
+    let json = serde_json::to_string_pretty(overrides)?;
+    if json.trim() == "{}" {
+        return Ok(output);
+    }
+
     output.push('\n');
     output.push_str(LAYOUT_BLOCK_START);
     output.push('\n');
 
-    let json = serde_json::to_string_pretty(overrides)?;
     for line in json.lines() {
         output.push_str("%% ");
         output.push_str(line);
