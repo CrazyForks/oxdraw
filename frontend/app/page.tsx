@@ -277,6 +277,9 @@ const resolveColor = (value: string | null | undefined, fallback: string): strin
 
 const normalizeColorInput = (value: string): string => value.trim().toLowerCase();
 
+const hasCodeAnnotations = (source: string): boolean =>
+  /^\s*%%\s*OXDRAW CODE\b/m.test(source);
+
 export default function Home() {
   const [diagram, setDiagram] = useState<DiagramData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -292,6 +295,7 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [codeMapMapping, setCodeMapMapping] = useState<CodeMapMapping | null>(null);
   const [codeMapMode, setCodeMapMode] = useState(false);
+  const [isCodeAnnotated, setIsCodeAnnotated] = useState(false);
   const [codedownMode, setCodedownMode] = useState(false);
   const [markdownContent, setMarkdownContent] = useState<string>("");
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string } | null>(null);
@@ -338,7 +342,7 @@ export default function Home() {
         setLeftPanelWidth(Math.max(200, Math.min(e.clientX, 600)));
       } else if (isRightPanelResizing) {
         const newWidth = document.body.clientWidth - e.clientX;
-        setRightPanelWidth(Math.max(300, Math.min(newWidth, 800)));
+        setRightPanelWidth(Math.max(300, newWidth));
       }
     };
 
@@ -397,6 +401,12 @@ const loadDiagram = useCallback(
       lastSubmittedSource.current = data.source;
       setSourceError(null);
       setSourceSaving(false);
+      const annotated = hasCodeAnnotations(data.source);
+      setIsCodeAnnotated(annotated);
+      if (!annotated) {
+        setCodeMapMode(false);
+        setCodeMapMapping(null);
+      }
 
       if (data.sourcePath.endsWith('.md')) {
         setCodedownMode(true);
@@ -428,15 +438,23 @@ const loadDiagram = useCallback(
 );
 
 useEffect(() => {
-  void loadDiagram().catch(() => undefined);
-  fetchCodeMapMapping().then((mapping) => {
-    if (mapping) {
-      setCodeMapMapping(mapping);
-      setCodeMapMode(true);
-    }
-  }).catch(() => {
-    // Ignore error, likely not in code map mode
-  });
+  void loadDiagram()
+    .then((data) => {
+      if (!hasCodeAnnotations(data.source)) {
+        setCodeMapMapping(null);
+        setCodeMapMode(false);
+        return;
+      }
+      fetchCodeMapMapping()
+        .then((mapping) => {
+          setCodeMapMapping(mapping);
+        })
+        .catch(() => {
+          setCodeMapMapping(null);
+          setCodeMapMode(false);
+        });
+    })
+    .catch(() => undefined);
 }, [loadDiagram]);
 
 useEffect(() => {
@@ -1472,9 +1490,9 @@ return (
         <button onClick={toggleTheme} title="Toggle Theme">
           {theme === "light" ? "Dark Mode" : "Light Mode"}
         </button>
-        {codeMapMapping && (
+        {isCodeAnnotated && codeMapMapping && (
           <button
-            onClick={() => setCodeMapMode(!codeMapMode)}
+            onClick={() => setCodeMapMode((current) => !current)}
             title="Toggle Code Map Mode"
           >
             {codeMapMode ? "Edit Diagram" : "View Code Map"}

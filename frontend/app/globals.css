@@ -869,14 +869,28 @@ body > div:first-of-type {
 
 /* Button for Left Panel when it is collapsed (appears on screen left edge) */
 .collapse-button.collapsed-left {
-  left: 0;
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
+  align-self: stretch;
+  height: auto;
   border-left: none;
+  border-top: none;
+  border-bottom: none;
 }
 
 /* Button for Right Panel when it is collapsed (appears on screen right edge) */
 .collapse-button.collapsed-right {
-  right: 0;
+  position: relative;
+  right: auto;
+  top: auto;
+  transform: none;
+  align-self: stretch;
+  height: auto;
   border-right: none;
+  border-top: none;
+  border-bottom: none;
 }
 
 .panel-actions {
