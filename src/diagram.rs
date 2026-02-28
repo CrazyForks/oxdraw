@@ -18,6 +18,8 @@ pub struct LayoutOverrides {
     pub node_styles: HashMap<String, NodeStyleOverride>,
     #[serde(default)]
     pub edge_styles: HashMap<String, EdgeStyleOverride>,
+    #[serde(default)]
+    pub gantt: GanttOverrides,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,7 @@ impl LayoutOverrides {
             && self.edges.is_empty()
             && self.node_styles.is_empty()
             && self.edge_styles.is_empty()
+            && self.gantt.is_empty()
     }
 
     pub fn prune(&mut self, nodes: &HashSet<String>, edges: &HashSet<String>) {
@@ -113,6 +116,8 @@ impl LayoutOverrides {
         self.edges.retain(|id, _| edges.contains(id));
         self.node_styles.retain(|id, _| nodes.contains(id));
         self.edge_styles.retain(|id, _| edges.contains(id));
+        self.gantt.tasks.retain(|id, _| nodes.contains(id));
+        self.gantt.tasks.retain(|_, task| !task.is_empty());
     }
 }
 
@@ -264,7 +269,7 @@ impl Diagram {
         overrides: Option<&LayoutOverrides>,
     ) -> Result<String> {
         if let DiagramKind::Gantt(gantt) = &self.kind {
-            return self.render_gantt_svg(gantt, background);
+            return self.render_gantt_svg(gantt, background, overrides);
         }
 
         let layout = self.layout(overrides)?;
@@ -739,12 +744,60 @@ impl Diagram {
         Ok(png_data)
     }
 
-    fn render_gantt_svg(&self, gantt: &GanttData, background: &str) -> Result<String> {
+    fn render_gantt_svg(
+        &self,
+        gantt: &GanttData,
+        background: &str,
+        overrides: Option<&LayoutOverrides>,
+    ) -> Result<String> {
+        let gantt_overrides = overrides.map(|ov| &ov.gantt);
+        let gantt_styles = gantt_overrides.map(|ov| &ov.style);
+
+        let row_fill_even = gantt_styles
+            .and_then(|style| style.row_fill_even.as_deref())
+            .unwrap_or("#eff6ff");
+        let row_fill_odd = gantt_styles
+            .and_then(|style| style.row_fill_odd.as_deref())
+            .unwrap_or("#dbeafe");
+        let default_task_fill = gantt_styles
+            .and_then(|style| style.task_fill.as_deref())
+            .unwrap_or("#2563eb");
+        let default_milestone_fill = gantt_styles
+            .and_then(|style| style.milestone_fill.as_deref())
+            .unwrap_or("#1d4ed8");
+        let default_task_text = gantt_styles
+            .and_then(|style| style.task_text.as_deref())
+            .unwrap_or("#ffffff");
+        let default_milestone_text = gantt_styles
+            .and_then(|style| style.milestone_text.as_deref())
+            .unwrap_or("#111827");
+
+        let effective_task_ranges: Vec<(f64, f64)> = gantt
+            .tasks
+            .iter()
+            .map(|task| {
+                let mut start = task.start_day;
+                let mut end = task.end_day;
+                if let Some(task_override) = gantt_overrides.and_then(|ov| ov.tasks.get(&task.id)) {
+                    if let Some(override_start) = task_override.start_day {
+                        start = override_start;
+                    }
+                    if let Some(override_end) = task_override.end_day {
+                        end = override_end;
+                    }
+                }
+                if end <= start {
+                    end = start + 0.001;
+                }
+                (start, end)
+            })
+            .collect();
+
         let mut min_start = f64::INFINITY;
         let mut max_end = f64::NEG_INFINITY;
-        for task in &gantt.tasks {
-            min_start = min_start.min(task.start_day);
-            max_end = max_end.max(task.end_day.max(task.start_day + 0.001));
+        for (start_day, end_day) in &effective_task_ranges {
+            min_start = min_start.min(*start_day);
+            max_end = max_end.max(*end_day);
         }
 
         if !min_start.is_finite() || !max_end.is_finite() {
@@ -757,10 +810,10 @@ impl Diagram {
 
         let section_label_width = 160.0_f32;
         let right_padding = 40.0_f32;
-        let top_margin = 90.0_f32;
+        let top_margin = 68.0_f32;
         let bottom_margin = 80.0_f32;
-        let row_height = 54.0_f32;
-        let bar_height = 34.0_f32;
+        let row_height = 40.0_f32;
+        let bar_height = 20.0_f32;
         let timeline_width = 1200.0_f32;
 
         let total_rows = gantt.tasks.len().max(1) as f32;
@@ -794,7 +847,7 @@ impl Diagram {
         if let Some(title) = &gantt.title {
             write!(
                 svg,
-                "  <text x=\"{:.1}\" y=\"44\" fill=\"#1a202c\" font-size=\"40\" font-weight=\"700\" text-anchor=\"middle\">{}</text>\n",
+                "  <text x=\"{:.1}\" y=\"36\" fill=\"#1a202c\" font-size=\"20\" font-weight=\"700\" text-anchor=\"middle\">{}</text>\n",
                 width / 2.0,
                 escape_xml(title)
             )?;
@@ -819,16 +872,30 @@ impl Diagram {
             };
             write!(
                 svg,
-                "  <rect x=\"0\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"#f1f5f9\" />\n",
+                "  <rect x=\"0\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" />\n",
                 top,
                 width,
-                (bottom - top).max(row_height)
+                (bottom - top).max(row_height),
+                if section_idx % 2 == 0 { row_fill_even } else { row_fill_odd },
             )?;
             write!(
                 svg,
-                "  <text x=\"16\" y=\"{:.1}\" fill=\"#1f2937\" font-size=\"20\" font-weight=\"600\" dominant-baseline=\"middle\">{}</text>\n",
+                "  <text x=\"16\" y=\"{:.1}\" fill=\"#1f2937\" font-size=\"14\" font-weight=\"600\" dominant-baseline=\"middle\">{}</text>\n",
                 (top + bottom) / 2.0,
                 escape_xml(section_name)
+            )?;
+        }
+
+        for row_idx in 0..gantt.tasks.len() {
+            let row_top = top_margin + row_idx as f32 * row_height;
+            write!(
+                svg,
+                "  <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"{}\" />\n",
+                axis_left,
+                row_top,
+                timeline_width,
+                row_height,
+                if row_idx % 2 == 0 { row_fill_even } else { row_fill_odd },
             )?;
         }
 
@@ -857,9 +924,28 @@ impl Diagram {
         for (row_idx, task) in gantt.tasks.iter().enumerate() {
             let row_top = top_margin + row_idx as f32 * row_height;
             let bar_y = row_top + (row_height - bar_height) / 2.0;
-            let start_x = x_for_day(task.start_day);
-            let end_x = x_for_day(task.end_day.max(task.start_day + 0.001));
+            let (start_day, end_day) = effective_task_ranges[row_idx];
+            let start_x = x_for_day(start_day);
+            let end_x = x_for_day(end_day);
             let bar_width = (end_x - start_x).max(8.0);
+            let node_style = overrides.and_then(|ov| ov.node_styles.get(&task.id));
+            let fill_color = node_style
+                .and_then(|style| style.fill.as_deref())
+                .unwrap_or(if task.milestone {
+                    default_milestone_fill
+                } else {
+                    default_task_fill
+                });
+            let text_color = node_style
+                .and_then(|style| style.text.as_deref())
+                .unwrap_or(if task.milestone {
+                    default_milestone_text
+                } else {
+                    default_task_text
+                });
+            let stroke_color = node_style
+                .and_then(|style| style.stroke.as_deref())
+                .unwrap_or("#ffffff");
 
             if task.milestone {
                 let cx = start_x + bar_width / 2.0;
@@ -867,7 +953,7 @@ impl Diagram {
                 let half = bar_height * 0.42;
                 write!(
                     svg,
-                    "  <polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" fill=\"#475569\" stroke=\"#f8fafc\" stroke-width=\"2\" />\n",
+                    "  <polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\" />\n",
                     cx,
                     cy - half,
                     cx + half,
@@ -876,24 +962,49 @@ impl Diagram {
                     cy + half,
                     cx - half,
                     cy,
+                    escape_xml(fill_color),
+                    escape_xml(stroke_color),
+                )?;
+                let right_x = cx + half + 8.0;
+                let left_x = cx - half - 8.0;
+                let estimated_width = (task.label.chars().count() as f32) * 7.0;
+                let fits_right = right_x + estimated_width <= width - 8.0;
+                let (label_x, anchor) = if fits_right {
+                    (right_x, "start")
+                } else if left_x - estimated_width >= 8.0 {
+                    (left_x, "end")
+                } else {
+                    ((cx + half + 4.0).min(width - 8.0), "start")
+                };
+                write!(
+                    svg,
+                    "  <text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\" font-size=\"14\" text-anchor=\"{}\" dominant-baseline=\"middle\">{}</text>\n",
+                    label_x,
+                    cy,
+                    escape_xml(text_color),
+                    anchor,
+                    escape_xml(&task.label)
                 )?;
             } else {
                 write!(
                     svg,
-                    "  <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"6\" ry=\"6\" fill=\"#6b7280\" stroke=\"#f8fafc\" stroke-width=\"2\" />\n",
+                    "  <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4\" ry=\"4\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2\" />\n",
                     start_x,
                     bar_y,
                     bar_width,
-                    bar_height
+                    bar_height,
+                    escape_xml(fill_color),
+                    escape_xml(stroke_color)
+                )?;
+                write!(
+                    svg,
+                    "  <text x=\"{:.1}\" y=\"{:.1}\" fill=\"{}\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>\n",
+                    start_x + bar_width / 2.0,
+                    bar_y + bar_height / 2.0,
+                    escape_xml(text_color),
+                    escape_xml(&task.label)
                 )?;
             }
-            write!(
-                svg,
-                "  <text x=\"{:.1}\" y=\"{:.1}\" fill=\"#f8fafc\" font-size=\"16\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>\n",
-                start_x + bar_width / 2.0,
-                bar_y + bar_height / 2.0,
-                escape_xml(&task.label)
-            )?;
         }
 
         svg.push_str("</svg>\n");

@@ -36,12 +36,42 @@ export async function fetchDiagram(): Promise<DiagramData> {
 }
 
 export async function updateLayout(update: LayoutUpdate): Promise<void> {
+  const payload: Record<string, unknown> = {};
+  if (update.nodes && Object.keys(update.nodes).length > 0) {
+    payload.nodes = update.nodes;
+  }
+  if (update.edges && Object.keys(update.edges).length > 0) {
+    payload.edges = update.edges;
+  }
+  if (update.ganttTasks && Object.keys(update.ganttTasks).length > 0) {
+    const entries: Array<[string, { start_day?: number; end_day?: number } | null]> = [];
+    for (const [taskId, value] of Object.entries(update.ganttTasks)) {
+      if (value === null) {
+        entries.push([taskId, null]);
+        continue;
+      }
+      const taskPatch: { start_day?: number; end_day?: number } = {};
+      if (value.startDay !== undefined) {
+        taskPatch.start_day = value.startDay;
+      }
+      if (value.endDay !== undefined) {
+        taskPatch.end_day = value.endDay;
+      }
+      entries.push([taskId, taskPatch]);
+    }
+    payload.gantt_tasks = Object.fromEntries(entries);
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return;
+  }
+
   const response = await fetch(`${API_BASE}/api/diagram/layout`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(update),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
@@ -88,6 +118,31 @@ export async function updateStyle(update: StyleUpdate): Promise<void> {
   }
   if (edgeEntries.length > 0) {
     payload["edge_styles"] = Object.fromEntries(edgeEntries);
+  }
+
+  if (update.ganttStyle) {
+    const ganttPatch: Record<string, string | null> = {};
+    if (update.ganttStyle.rowFillEven !== undefined) {
+      ganttPatch.row_fill_even = update.ganttStyle.rowFillEven;
+    }
+    if (update.ganttStyle.rowFillOdd !== undefined) {
+      ganttPatch.row_fill_odd = update.ganttStyle.rowFillOdd;
+    }
+    if (update.ganttStyle.taskFill !== undefined) {
+      ganttPatch.task_fill = update.ganttStyle.taskFill;
+    }
+    if (update.ganttStyle.milestoneFill !== undefined) {
+      ganttPatch.milestone_fill = update.ganttStyle.milestoneFill;
+    }
+    if (update.ganttStyle.taskText !== undefined) {
+      ganttPatch.task_text = update.ganttStyle.taskText;
+    }
+    if (update.ganttStyle.milestoneText !== undefined) {
+      ganttPatch.milestone_text = update.ganttStyle.milestoneText;
+    }
+    if (Object.keys(ganttPatch).length > 0) {
+      payload["gantt_style"] = ganttPatch;
+    }
   }
 
   if (Object.keys(payload).length === 0) {

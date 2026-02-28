@@ -78,6 +78,7 @@ struct ServeState {
 #[serde(rename_all = "camelCase")]
 struct DiagramPayload {
     source_path: String,
+    kind: String,
     background: String,
     auto_size: CanvasSize,
     render_size: CanvasSize,
@@ -85,7 +86,51 @@ struct DiagramPayload {
     edges: Vec<EdgePayload>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     subgraphs: Vec<SubgraphPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gantt: Option<GanttPayload>,
     source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GanttPayload {
+    date_format: String,
+    title: Option<String>,
+    min_day: f64,
+    max_day: f64,
+    section_label_width: f32,
+    timeline_width: f32,
+    top_margin: f32,
+    row_height: f32,
+    bar_height: f32,
+    right_padding: f32,
+    bottom_margin: f32,
+    sections: Vec<String>,
+    tasks: Vec<GanttTaskPayload>,
+    style: GanttStylePayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GanttTaskPayload {
+    id: String,
+    label: String,
+    section_index: usize,
+    row_index: usize,
+    start_day: f64,
+    end_day: f64,
+    milestone: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GanttStylePayload {
+    row_fill_even: String,
+    row_fill_odd: String,
+    task_fill: String,
+    milestone_fill: String,
+    task_text: String,
+    milestone_text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +212,16 @@ struct LayoutUpdate {
     nodes: HashMap<String, Option<Point>>,
     #[serde(default)]
     edges: HashMap<String, Option<EdgeOverride>>,
+    #[serde(default)]
+    gantt_tasks: HashMap<String, Option<GanttTaskLayoutUpdate>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GanttTaskLayoutUpdate {
+    #[serde(default)]
+    start_day: Option<f64>,
+    #[serde(default)]
+    end_day: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +235,8 @@ struct StyleUpdate {
     node_styles: HashMap<String, Option<NodeStylePatch>>,
     #[serde(default)]
     edge_styles: HashMap<String, Option<EdgeStylePatch>>,
+    #[serde(default)]
+    gantt_style: Option<GanttStylePatch>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +323,24 @@ impl ServeState {
                 }
             }
 
+            for (id, value) in update.gantt_tasks {
+                match value {
+                    Some(task_override) => {
+                        let mut current = overrides.gantt.tasks.remove(&id).unwrap_or_default();
+                        current.start_day = task_override.start_day;
+                        current.end_day = task_override.end_day;
+                        if current.is_empty() {
+                            overrides.gantt.tasks.remove(&id);
+                        } else {
+                            overrides.gantt.tasks.insert(id, current);
+                        }
+                    }
+                    None => {
+                        overrides.gantt.tasks.remove(&id);
+                    }
+                }
+            }
+
             overrides.clone()
         };
 
@@ -333,6 +408,27 @@ impl ServeState {
                     None => {
                         overrides.edge_styles.remove(&id);
                     }
+                }
+            }
+
+            if let Some(patch) = update.gantt_style {
+                if let Some(value) = patch.row_fill_even {
+                    overrides.gantt.style.row_fill_even = value;
+                }
+                if let Some(value) = patch.row_fill_odd {
+                    overrides.gantt.style.row_fill_odd = value;
+                }
+                if let Some(value) = patch.task_fill {
+                    overrides.gantt.style.task_fill = value;
+                }
+                if let Some(value) = patch.milestone_fill {
+                    overrides.gantt.style.milestone_fill = value;
+                }
+                if let Some(value) = patch.milestone_text {
+                    overrides.gantt.style.milestone_text = value;
+                }
+                if let Some(value) = patch.task_text {
+                    overrides.gantt.style.task_text = value;
                 }
             }
 
@@ -767,8 +863,108 @@ async fn get_diagram(
         });
     }
 
+    let (kind, gantt_payload) = match &diagram.kind {
+        DiagramKind::Flowchart => ("flowchart".to_string(), None),
+        DiagramKind::Gantt(gantt) => {
+            let gantt_overrides = &overrides.gantt;
+            let row_fill_even = gantt_overrides
+                .style
+                .row_fill_even
+                .clone()
+                .unwrap_or_else(|| "#eff6ff".to_string());
+            let row_fill_odd = gantt_overrides
+                .style
+                .row_fill_odd
+                .clone()
+                .unwrap_or_else(|| "#dbeafe".to_string());
+            let task_fill = gantt_overrides
+                .style
+                .task_fill
+                .clone()
+                .unwrap_or_else(|| "#2563eb".to_string());
+            let milestone_fill = gantt_overrides
+                .style
+                .milestone_fill
+                .clone()
+                .unwrap_or_else(|| "#1d4ed8".to_string());
+            let task_text = gantt_overrides
+                .style
+                .task_text
+                .clone()
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let milestone_text = gantt_overrides
+                .style
+                .milestone_text
+                .clone()
+                .unwrap_or_else(|| "#111827".to_string());
+
+            let mut min_day = f64::INFINITY;
+            let mut max_day = f64::NEG_INFINITY;
+            let mut tasks = Vec::with_capacity(gantt.tasks.len());
+
+            for (row_index, task) in gantt.tasks.iter().enumerate() {
+                let task_override = gantt_overrides.tasks.get(&task.id);
+                let start_day = task_override
+                    .and_then(|entry| entry.start_day)
+                    .unwrap_or(task.start_day);
+                let mut end_day = task_override
+                    .and_then(|entry| entry.end_day)
+                    .unwrap_or(task.end_day);
+                if end_day <= start_day {
+                    end_day = start_day + 0.001;
+                }
+
+                min_day = min_day.min(start_day);
+                max_day = max_day.max(end_day);
+
+                tasks.push(GanttTaskPayload {
+                    id: task.id.clone(),
+                    label: task.label.clone(),
+                    section_index: task.section_index,
+                    row_index,
+                    start_day,
+                    end_day,
+                    milestone: task.milestone,
+                });
+            }
+
+            if !min_day.is_finite() || !max_day.is_finite() || max_day <= min_day {
+                min_day = 0.0;
+                max_day = 1.0;
+            }
+
+            (
+                "gantt".to_string(),
+                Some(GanttPayload {
+                    date_format: gantt.date_format.clone(),
+                    title: gantt.title.clone(),
+                    min_day,
+                    max_day,
+                    section_label_width: 160.0,
+                    timeline_width: 1200.0,
+                    top_margin: 68.0,
+                    row_height: 40.0,
+                    bar_height: 20.0,
+                    right_padding: 40.0,
+                    bottom_margin: 80.0,
+                    sections: gantt.sections.clone(),
+                    tasks,
+                    style: GanttStylePayload {
+                        row_fill_even,
+                        row_fill_odd,
+                        task_fill,
+                        milestone_fill,
+                        task_text,
+                        milestone_text,
+                    },
+                }),
+            )
+        }
+    };
+
     let payload = DiagramPayload {
         source_path: state.source_path.display().to_string(),
+        kind,
         background: state.background.clone(),
         auto_size: layout.auto_size,
         render_size: CanvasSize {
@@ -778,6 +974,7 @@ async fn get_diagram(
         nodes,
         edges,
         subgraphs,
+        gantt: gantt_payload,
         source,
     };
 

@@ -78,20 +78,59 @@ export interface SubgraphData {
   parentId?: string;
 }
 
+export interface GanttTaskData {
+  id: string;
+  label: string;
+  sectionIndex: number;
+  rowIndex: number;
+  startDay: number;
+  endDay: number;
+  milestone: boolean;
+}
+
+export interface GanttStyleData {
+  rowFillEven: string;
+  rowFillOdd: string;
+  taskFill: string;
+  milestoneFill: string;
+  taskText: string;
+  milestoneText: string;
+}
+
+export interface GanttData {
+  dateFormat: string;
+  title?: string;
+  minDay: number;
+  maxDay: number;
+  sectionLabelWidth: number;
+  timelineWidth: number;
+  topMargin: number;
+  rowHeight: number;
+  barHeight: number;
+  rightPadding: number;
+  bottomMargin: number;
+  sections: string[];
+  tasks: GanttTaskData[];
+  style: GanttStyleData;
+}
+
 export interface DiagramData {
   sourcePath: string;
+  kind: "flowchart" | "gantt";
   background: string;
   autoSize: Size;
   renderSize: Size;
   nodes: NodeData[];
   edges: EdgeData[];
   subgraphs?: SubgraphData[];
+  gantt?: GanttData;
   source: string;
 }
 
 export interface LayoutUpdate {
   nodes?: Record<string, Point | null>;
   edges?: Record<string, { points?: Point[] | null }>;
+  ganttTasks?: Record<string, { startDay?: number; endDay?: number } | null>;
 }
 
 export interface NodeStyleUpdate {
@@ -111,6 +150,14 @@ export interface EdgeStyleUpdate {
 export interface StyleUpdate {
   nodeStyles?: Record<string, NodeStyleUpdate | null | undefined>;
   edgeStyles?: Record<string, EdgeStyleUpdate | null | undefined>;
+  ganttStyle?: {
+    rowFillEven?: string | null;
+    rowFillOdd?: string | null;
+    taskFill?: string | null;
+    milestoneFill?: string | null;
+    taskText?: string | null;
+    milestoneText?: string | null;
+  };
 }
 
 export interface SearchResult {
