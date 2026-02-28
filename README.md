@@ -41,6 +41,13 @@ oxdraw --input flow.mmd
 oxdraw --input flow.mmd --edit
 ```
 
+### Gantt Syntax
+Aside from the default flowcharts, Gantt charts can also be rendered in Mermaid syntax using the CLI.
+
+They also can be easily modified in the web editor using the `--edit` flag which syncs the changes to the file.
+
+https://github.com/user-attachments/assets/8cd00ec4-8687-4520-9c5d-629e4d28aedc
+
 ### Have AI Generate a Codemap
 This will also launch the interactive viewer mapping the nodes to files in the repo. You can refer to [ai.md](docs/ai.md) for free resources on setting up AI access
 
@@ -155,7 +162,7 @@ This is an example of using the delete key to remove one relationship and then u
 There's definitely some improvements to be made to this algorithm so I imagine this will keep getting better :)
 
 ## Community
-If you do end up using oxdraw, please let me know! You can open issues or discussion posts on GitHub or reach out to me on one of the socials from my Github profile. I would love to hear how you are using it, any feedback you have, and/or add your project to this section!
+If you do end up using oxdraw or are interested in contributing to oxdraw feel free to send me a message in the oxdraw channel on [my discord](https://discord.gg/cHpnNAYqD3), open a Github Issue, or submite a PR. I would love to hear how you are using it, any feedback you have, and/or add your project to this section! 
 
 Check out these projects using oxdraw:
 - [Typst-Oxdraw](https://github.com/hongjr03/typst-oxdraw/) is a repo that integrates oxdraw diagrams into Typst documents. 
