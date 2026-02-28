@@ -964,7 +964,8 @@ const handleLayoutUpdate = useCallback(
   (update: LayoutUpdate) => {
     const hasNodes = update.nodes && Object.keys(update.nodes).length > 0;
     const hasEdges = update.edges && Object.keys(update.edges).length > 0;
-    if (!hasNodes && !hasEdges) {
+    const hasGanttTasks = update.ganttTasks && Object.keys(update.ganttTasks).length > 0;
+    if (!hasNodes && !hasEdges && !hasGanttTasks) {
       return;
     }
     void applyUpdate(update);

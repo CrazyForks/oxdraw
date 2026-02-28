@@ -111,9 +111,9 @@ pub struct GanttStyleOverride {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GanttOverrides {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tasks: HashMap<String, GanttTaskOverride>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "GanttStyleOverride::is_empty")]
     pub style: GanttStyleOverride,
 }
 

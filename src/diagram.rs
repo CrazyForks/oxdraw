@@ -10,15 +10,15 @@ use crate::*;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LayoutOverrides {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub nodes: HashMap<String, Point>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub edges: HashMap<String, EdgeOverride>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub node_styles: HashMap<String, NodeStyleOverride>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub edge_styles: HashMap<String, EdgeStyleOverride>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "GanttOverrides::is_empty")]
     pub gantt: GanttOverrides,
 }
 
@@ -4789,7 +4789,7 @@ fn parse_gantt_duration_days(value: &str) -> Option<f64> {
     None
 }
 
-fn format_gantt_day(day: f64, date_format: &str) -> String {
+pub(crate) fn format_gantt_day(day: f64, date_format: &str) -> String {
     if date_format.eq_ignore_ascii_case("YYYY-MM-DD") {
         let rounded = day.round() as i64;
         let (year, month, day_of_month) = civil_from_days(rounded);
