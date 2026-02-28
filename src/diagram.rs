@@ -157,9 +157,9 @@ impl Diagram {
 
         let mut lines = content_lines.into_iter();
 
-        let header = lines
-            .next()
-            .ok_or_else(|| anyhow!("diagram definition must start with a 'graph' or 'gantt' declaration"))?;
+        let header = lines.next().ok_or_else(|| {
+            anyhow!("diagram definition must start with a 'graph' or 'gantt' declaration")
+        })?;
 
         let keyword = header
             .split_whitespace()
@@ -876,7 +876,11 @@ impl Diagram {
                 top,
                 width,
                 (bottom - top).max(row_height),
-                if section_idx % 2 == 0 { row_fill_even } else { row_fill_odd },
+                if section_idx % 2 == 0 {
+                    row_fill_even
+                } else {
+                    row_fill_odd
+                },
             )?;
             write!(
                 svg,
@@ -895,7 +899,11 @@ impl Diagram {
                 row_top,
                 timeline_width,
                 row_height,
-                if row_idx % 2 == 0 { row_fill_even } else { row_fill_odd },
+                if row_idx % 2 == 0 {
+                    row_fill_even
+                } else {
+                    row_fill_odd
+                },
             )?;
         }
 
@@ -907,10 +915,7 @@ impl Diagram {
             write!(
                 svg,
                 "  <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#cbd5e1\" stroke-width=\"1\" />\n",
-                x,
-                axis_top,
-                x,
-                axis_bottom
+                x, axis_top, x, axis_bottom
             )?;
             write!(
                 svg,
@@ -4523,7 +4528,8 @@ fn parse_gantt_diagram(lines: Vec<String>, original_source: &str) -> Result<Diag
 
         if !metadata_tokens.is_empty() {
             let descriptors = &metadata_tokens[idx..];
-            let (task_logical_id, start_expr, end_expr) = parse_gantt_timing_descriptors(descriptors);
+            let (task_logical_id, start_expr, end_expr) =
+                parse_gantt_timing_descriptors(descriptors);
 
             if let Some(task_id) = task_logical_id {
                 logical_id_to_node.insert(task_id, node_id.clone());
@@ -4541,12 +4547,9 @@ fn parse_gantt_diagram(lines: Vec<String>, original_source: &str) -> Result<Diag
             }
 
             if let Some(expr) = end_expr {
-                if let Some(day) = resolve_gantt_end_expr(
-                    &expr,
-                    &date_format,
-                    start_day,
-                    &gantt_start_by_id,
-                ) {
+                if let Some(day) =
+                    resolve_gantt_end_expr(&expr, &date_format, start_day, &gantt_start_by_id)
+                {
                     end_day = day;
                 }
             } else {
@@ -4897,11 +4900,7 @@ fn strip_prefix_case_insensitive<'a>(input: &'a str, prefix: &str) -> Option<&'a
     }
 
     let rest = tail.trim_start();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
-    }
+    if rest.is_empty() { None } else { Some(rest) }
 }
 
 fn looks_like_gantt_temporal_expression(token: &str) -> bool {
@@ -4933,10 +4932,13 @@ fn looks_like_gantt_temporal_expression(token: &str) -> bool {
         "d",
         "w",
     ];
-    if duration_units
-        .iter()
-        .any(|unit| lower.ends_with(unit) && lower[..lower.len() - unit.len()].trim().parse::<f32>().is_ok())
-    {
+    if duration_units.iter().any(|unit| {
+        lower.ends_with(unit)
+            && lower[..lower.len() - unit.len()]
+                .trim()
+                .parse::<f32>()
+                .is_ok()
+    }) {
         return true;
     }
 
