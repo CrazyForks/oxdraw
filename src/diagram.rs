@@ -65,7 +65,33 @@ impl SubgraphBuilder {
 }
 
 #[derive(Debug, Clone)]
+pub enum DiagramKind {
+    Flowchart,
+    Gantt(GanttData),
+}
+
+#[derive(Debug, Clone)]
+pub struct GanttData {
+    pub title: Option<String>,
+    pub date_format: String,
+    pub sections: Vec<String>,
+    pub tasks: Vec<GanttTask>,
+    pub original_source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GanttTask {
+    pub id: String,
+    pub label: String,
+    pub section_index: usize,
+    pub start_day: f64,
+    pub end_day: f64,
+    pub milestone: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct Diagram {
+    pub kind: DiagramKind,
     pub direction: Direction,
     pub nodes: HashMap<String, Node>,
     pub order: Vec<String>,
@@ -92,12 +118,24 @@ impl LayoutOverrides {
 
 impl Diagram {
     pub fn parse(definition: &str) -> Result<Self> {
+        let definition = extract_mermaid_diagram_source(definition);
         let mut image_comments: HashMap<String, NodeImage> = HashMap::new();
         let mut content_lines: Vec<String> = Vec::new();
+        let mut in_frontmatter = false;
+        let mut seen_content = false;
 
         for raw_line in definition.lines() {
             let trimmed = raw_line.trim();
             if trimmed.is_empty() {
+                continue;
+            }
+
+            if trimmed == "---" && !seen_content {
+                in_frontmatter = !in_frontmatter;
+                continue;
+            }
+
+            if in_frontmatter {
                 continue;
             }
 
@@ -109,13 +147,24 @@ impl Diagram {
             }
 
             content_lines.push(trimmed.to_string());
+            seen_content = true;
         }
 
         let mut lines = content_lines.into_iter();
 
         let header = lines
             .next()
-            .ok_or_else(|| anyhow!("diagram definition must start with a 'graph' declaration"))?;
+            .ok_or_else(|| anyhow!("diagram definition must start with a 'graph' or 'gantt' declaration"))?;
+
+        let keyword = header
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        if keyword == "gantt" {
+            return parse_gantt_diagram(lines.collect(), &definition);
+        }
 
         let direction = parse_graph_header(&header)?;
 
@@ -196,6 +245,7 @@ impl Diagram {
         }
 
         Ok(Self {
+            kind: DiagramKind::Flowchart,
             direction,
             nodes,
             order,
@@ -213,6 +263,10 @@ impl Diagram {
         background: &str,
         overrides: Option<&LayoutOverrides>,
     ) -> Result<String> {
+        if let DiagramKind::Gantt(gantt) = &self.kind {
+            return self.render_gantt_svg(gantt, background);
+        }
+
         let layout = self.layout(overrides)?;
         let geometry = align_geometry(
             &layout.final_positions,
@@ -683,6 +737,167 @@ impl Diagram {
             .map_err(|err| anyhow!("failed to encode PNG output: {err}"))?;
 
         Ok(png_data)
+    }
+
+    fn render_gantt_svg(&self, gantt: &GanttData, background: &str) -> Result<String> {
+        let mut min_start = f64::INFINITY;
+        let mut max_end = f64::NEG_INFINITY;
+        for task in &gantt.tasks {
+            min_start = min_start.min(task.start_day);
+            max_end = max_end.max(task.end_day.max(task.start_day + 0.001));
+        }
+
+        if !min_start.is_finite() || !max_end.is_finite() {
+            bail!("gantt diagram does not contain timeline data");
+        }
+
+        if (max_end - min_start).abs() < f64::EPSILON {
+            max_end = min_start + 1.0;
+        }
+
+        let section_label_width = 160.0_f32;
+        let right_padding = 40.0_f32;
+        let top_margin = 90.0_f32;
+        let bottom_margin = 80.0_f32;
+        let row_height = 54.0_f32;
+        let bar_height = 34.0_f32;
+        let timeline_width = 1200.0_f32;
+
+        let total_rows = gantt.tasks.len().max(1) as f32;
+        let content_height = total_rows * row_height;
+        let width = section_label_width + timeline_width + right_padding;
+        let height = top_margin + content_height + bottom_margin;
+
+        let axis_left = section_label_width;
+        let axis_top = top_margin - 14.0;
+        let axis_bottom = top_margin + content_height;
+
+        let x_for_day = |day: f64| -> f32 {
+            let ratio = ((day - min_start) / (max_end - min_start)).clamp(0.0, 1.0);
+            axis_left + (timeline_width as f64 * ratio) as f32
+        };
+
+        let mut svg = String::new();
+        write!(
+            svg,
+            r##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{:.0}" height="{:.0}" viewBox="0 0 {:.0} {:.0}" font-family="Inter, system-ui, sans-serif">
+  <rect width="100%" height="100%" fill="{}" />
+"##,
+            width,
+            height,
+            width,
+            height,
+            escape_xml(background),
+        )?;
+
+        if let Some(title) = &gantt.title {
+            write!(
+                svg,
+                "  <text x=\"{:.1}\" y=\"44\" fill=\"#1a202c\" font-size=\"40\" font-weight=\"700\" text-anchor=\"middle\">{}</text>\n",
+                width / 2.0,
+                escape_xml(title)
+            )?;
+        }
+
+        let mut section_bounds: HashMap<usize, (f32, f32)> = HashMap::new();
+        for (row_idx, task) in gantt.tasks.iter().enumerate() {
+            let row_top = top_margin + row_idx as f32 * row_height;
+            let row_bottom = row_top + row_height;
+            section_bounds
+                .entry(task.section_index)
+                .and_modify(|bound| {
+                    bound.0 = bound.0.min(row_top);
+                    bound.1 = bound.1.max(row_bottom);
+                })
+                .or_insert((row_top, row_bottom));
+        }
+
+        for (section_idx, section_name) in gantt.sections.iter().enumerate() {
+            let Some((top, bottom)) = section_bounds.get(&section_idx).copied() else {
+                continue;
+            };
+            write!(
+                svg,
+                "  <rect x=\"0\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"#f1f5f9\" />\n",
+                top,
+                width,
+                (bottom - top).max(row_height)
+            )?;
+            write!(
+                svg,
+                "  <text x=\"16\" y=\"{:.1}\" fill=\"#1f2937\" font-size=\"20\" font-weight=\"600\" dominant-baseline=\"middle\">{}</text>\n",
+                (top + bottom) / 2.0,
+                escape_xml(section_name)
+            )?;
+        }
+
+        let ticks = 8_usize;
+        for idx in 0..=ticks {
+            let ratio = idx as f64 / ticks as f64;
+            let day = min_start + (max_end - min_start) * ratio;
+            let x = axis_left + timeline_width * ratio as f32;
+            write!(
+                svg,
+                "  <line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#cbd5e1\" stroke-width=\"1\" />\n",
+                x,
+                axis_top,
+                x,
+                axis_bottom
+            )?;
+            write!(
+                svg,
+                "  <text x=\"{:.1}\" y=\"{:.1}\" fill=\"#64748b\" font-size=\"16\" text-anchor=\"middle\">{}</text>\n",
+                x,
+                axis_bottom + 32.0,
+                escape_xml(&format_gantt_day(day, &gantt.date_format))
+            )?;
+        }
+
+        for (row_idx, task) in gantt.tasks.iter().enumerate() {
+            let row_top = top_margin + row_idx as f32 * row_height;
+            let bar_y = row_top + (row_height - bar_height) / 2.0;
+            let start_x = x_for_day(task.start_day);
+            let end_x = x_for_day(task.end_day.max(task.start_day + 0.001));
+            let bar_width = (end_x - start_x).max(8.0);
+
+            if task.milestone {
+                let cx = start_x + bar_width / 2.0;
+                let cy = bar_y + bar_height / 2.0;
+                let half = bar_height * 0.42;
+                write!(
+                    svg,
+                    "  <polygon points=\"{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" fill=\"#475569\" stroke=\"#f8fafc\" stroke-width=\"2\" />\n",
+                    cx,
+                    cy - half,
+                    cx + half,
+                    cy,
+                    cx,
+                    cy + half,
+                    cx - half,
+                    cy,
+                )?;
+            } else {
+                write!(
+                    svg,
+                    "  <rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"6\" ry=\"6\" fill=\"#6b7280\" stroke=\"#f8fafc\" stroke-width=\"2\" />\n",
+                    start_x,
+                    bar_y,
+                    bar_width,
+                    bar_height
+                )?;
+            }
+            write!(
+                svg,
+                "  <text x=\"{:.1}\" y=\"{:.1}\" fill=\"#f8fafc\" font-size=\"16\" text-anchor=\"middle\" dominant-baseline=\"middle\">{}</text>\n",
+                start_x + bar_width / 2.0,
+                bar_y + bar_height / 2.0,
+                escape_xml(&task.label)
+            )?;
+        }
+
+        svg.push_str("</svg>\n");
+        Ok(svg)
     }
 
     pub fn layout(&self, overrides: Option<&LayoutOverrides>) -> Result<LayoutComputation> {
@@ -1852,6 +2067,14 @@ impl Diagram {
     }
 
     pub fn to_definition(&self) -> String {
+        if let DiagramKind::Gantt(gantt) = &self.kind {
+            let mut source = gantt.original_source.clone();
+            if !source.ends_with('\n') {
+                source.push('\n');
+            }
+            return source;
+        }
+
         let mut lines = Vec::new();
         lines.push(format!("graph {}", self.direction.as_token()));
 
@@ -3934,6 +4157,718 @@ fn parse_graph_header(line: &str) -> Result<Direction> {
     };
 
     Ok(direction)
+}
+
+fn extract_mermaid_diagram_source(source: &str) -> String {
+    if starts_with_supported_diagram_header(source) {
+        return source.to_string();
+    }
+
+    let mut in_mermaid_fence = false;
+    let mut block_lines: Vec<String> = Vec::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        if !in_mermaid_fence {
+            if let Some(info) = trimmed.strip_prefix("```") {
+                let language = info.trim().to_ascii_lowercase();
+                if language.starts_with("mermaid") {
+                    in_mermaid_fence = true;
+                    block_lines.clear();
+                }
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("```") {
+            let candidate = block_lines.join("\n");
+            if starts_with_supported_diagram_header(&candidate) {
+                let mut normalized = candidate;
+                if !normalized.ends_with('\n') {
+                    normalized.push('\n');
+                }
+                return normalized;
+            }
+            in_mermaid_fence = false;
+            block_lines.clear();
+            continue;
+        }
+
+        block_lines.push(line.to_string());
+    }
+
+    source.to_string()
+}
+
+fn starts_with_supported_diagram_header(source: &str) -> bool {
+    let mut in_frontmatter = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("%%") {
+            continue;
+        }
+
+        if trimmed == "---" {
+            in_frontmatter = !in_frontmatter;
+            continue;
+        }
+
+        if in_frontmatter {
+            continue;
+        }
+
+        let keyword = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        return keyword == "graph" || keyword == "gantt";
+    }
+
+    false
+}
+
+fn parse_gantt_diagram(lines: Vec<String>, original_source: &str) -> Result<Diagram> {
+    let mut nodes: HashMap<String, Node> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut edge_keys: HashSet<(String, String)> = HashSet::new();
+    let mut node_membership: HashMap<String, Vec<String>> = HashMap::new();
+    let mut top_subgraphs: Vec<SubgraphBuilder> = Vec::new();
+    let mut seen_subgraph_ids: HashSet<String> = HashSet::new();
+    let mut current_section: Option<usize> = None;
+    let mut logical_id_to_node: HashMap<String, String> = HashMap::new();
+    let mut pending_after: Vec<(String, String)> = Vec::new();
+    let mut pending_until: Vec<(String, String)> = Vec::new();
+    let mut previous_task_id: Option<String> = None;
+    let mut previous_task_end: f64 = 0.0;
+    let mut first_task = true;
+    let mut generated_task_counter = 0_usize;
+    let mut in_frontmatter = false;
+    let mut title: Option<String> = None;
+    let mut date_format = "YYYY-MM-DD".to_string();
+    let mut gantt_tasks: Vec<GanttTask> = Vec::new();
+    let mut gantt_start_by_id: HashMap<String, f64> = HashMap::new();
+    let mut gantt_end_by_id: HashMap<String, f64> = HashMap::new();
+
+    for raw_line in lines {
+        let mut line = raw_line.trim();
+        if line.is_empty() || line.starts_with("%%") {
+            continue;
+        }
+
+        if line == "---" {
+            in_frontmatter = !in_frontmatter;
+            continue;
+        }
+
+        if in_frontmatter {
+            continue;
+        }
+
+        line = line.trim_end_matches(';').trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(section_label) = line.strip_prefix("section") {
+            let label = section_label.trim();
+            if !label.is_empty() {
+                let base_id = normalize_subgraph_id(label);
+                let mut id = base_id.clone();
+                let mut dedupe = 1_usize;
+                while !seen_subgraph_ids.insert(id.clone()) {
+                    dedupe += 1;
+                    id = format!("{}_{}", base_id, dedupe);
+                }
+                let order_idx = top_subgraphs.len();
+                top_subgraphs.push(SubgraphBuilder::new(id, label.to_string(), order_idx));
+                current_section = Some(order_idx);
+            }
+            continue;
+        }
+
+        let lower = line.to_ascii_lowercase();
+        if let Some(raw_title) = line.strip_prefix("title") {
+            let parsed = raw_title.trim();
+            if !parsed.is_empty() {
+                title = Some(parsed.to_string());
+            }
+            continue;
+        }
+
+        if let Some(raw_df) = line.strip_prefix("dateFormat") {
+            let parsed = raw_df.trim();
+            if !parsed.is_empty() {
+                date_format = parsed.to_string();
+            }
+            continue;
+        }
+
+        if lower.starts_with("title ")
+            || lower.starts_with("dateformat ")
+            || lower.starts_with("axisformat ")
+            || lower.starts_with("excludes ")
+            || lower.starts_with("includes ")
+            || lower.starts_with("tickinterval ")
+            || lower.starts_with("todaymarker ")
+            || lower.starts_with("weekend ")
+            || lower.starts_with("weekday ")
+            || lower.starts_with("click ")
+            || lower.starts_with("inclusivenddates")
+            || lower.starts_with("inclusiveenddates")
+            || lower.starts_with("acctitle:")
+            || lower.starts_with("accdescr:")
+            || lower.starts_with("accdescription:")
+        {
+            continue;
+        }
+
+        let Some((task_title_raw, metadata_raw)) = line.split_once(':') else {
+            continue;
+        };
+
+        let task_title = task_title_raw.trim();
+        if task_title.is_empty() {
+            continue;
+        }
+
+        let metadata_tokens: Vec<String> = metadata_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(ToString::to_string)
+            .collect();
+
+        let mut idx = 0_usize;
+        let mut saw_milestone = false;
+        let mut saw_vert = false;
+        while idx < metadata_tokens.len() {
+            let token = metadata_tokens[idx].to_ascii_lowercase();
+            let is_tag = matches!(
+                token.as_str(),
+                "active" | "done" | "crit" | "milestone" | "milestore" | "vert"
+            );
+            if !is_tag {
+                break;
+            }
+            if token == "milestone" || token == "milestore" {
+                saw_milestone = true;
+            }
+            if token == "vert" {
+                saw_vert = true;
+            }
+            idx += 1;
+        }
+
+        let descriptors = &metadata_tokens[idx..];
+        let (explicit_task_id, after_refs, until_refs, has_explicit_start) =
+            parse_gantt_metadata(descriptors);
+
+        generated_task_counter += 1;
+        let base_node_id = explicit_task_id
+            .clone()
+            .unwrap_or_else(|| format!("task_{}", generated_task_counter));
+        let node_id = make_unique_node_id(&base_node_id, &nodes);
+        let shape = if saw_milestone {
+            NodeShape::DoubleCircle
+        } else if saw_vert {
+            NodeShape::Diamond
+        } else {
+            NodeShape::Rectangle
+        };
+        let (width, height) = compute_node_dimensions(shape, task_title);
+
+        nodes.insert(
+            node_id.clone(),
+            Node {
+                label: task_title.to_string(),
+                shape,
+                image: None,
+                width,
+                height,
+            },
+        );
+        order.push(node_id.clone());
+
+        if let Some(section_idx) = current_section {
+            if let Some(section) = top_subgraphs.get_mut(section_idx) {
+                section.nodes.push(node_id.clone());
+                node_membership.insert(node_id.clone(), vec![section.id.clone()]);
+            }
+        } else {
+            node_membership.insert(node_id.clone(), Vec::new());
+        }
+
+        if let Some(explicit) = explicit_task_id {
+            logical_id_to_node.insert(explicit, node_id.clone());
+        }
+        logical_id_to_node.insert(node_id.clone(), node_id.clone());
+
+        let mut start_day = if first_task { 0.0 } else { previous_task_end };
+        let mut end_day = start_day + 1.0;
+
+        if !metadata_tokens.is_empty() {
+            let descriptors = &metadata_tokens[idx..];
+            let (task_logical_id, start_expr, end_expr) = parse_gantt_timing_descriptors(descriptors);
+
+            if let Some(task_id) = task_logical_id {
+                logical_id_to_node.insert(task_id, node_id.clone());
+            }
+
+            if let Some(expr) = start_expr {
+                if let Some(day) = resolve_gantt_start_expr(
+                    &expr,
+                    &date_format,
+                    previous_task_end,
+                    &gantt_end_by_id,
+                ) {
+                    start_day = day;
+                }
+            }
+
+            if let Some(expr) = end_expr {
+                if let Some(day) = resolve_gantt_end_expr(
+                    &expr,
+                    &date_format,
+                    start_day,
+                    &gantt_start_by_id,
+                ) {
+                    end_day = day;
+                }
+            } else {
+                end_day = start_day + 1.0;
+            }
+        }
+
+        if end_day <= start_day {
+            end_day = start_day + 0.2;
+        }
+
+        gantt_tasks.push(GanttTask {
+            id: node_id.clone(),
+            label: task_title.to_string(),
+            section_index: current_section.unwrap_or(0),
+            start_day,
+            end_day,
+            milestone: saw_milestone,
+        });
+
+        gantt_start_by_id.insert(node_id.clone(), start_day);
+        gantt_end_by_id.insert(node_id.clone(), end_day);
+
+        if !after_refs.is_empty() {
+            for dep in after_refs {
+                if let Some(from_node) = logical_id_to_node.get(&dep) {
+                    push_gantt_edge(&mut edges, &mut edge_keys, from_node, &node_id);
+                } else {
+                    pending_after.push((dep, node_id.clone()));
+                }
+            }
+        } else if !has_explicit_start {
+            if let Some(previous) = &previous_task_id {
+                push_gantt_edge(&mut edges, &mut edge_keys, previous, &node_id);
+            }
+        }
+
+        for dep in until_refs {
+            if let Some(target_node) = logical_id_to_node.get(&dep) {
+                push_gantt_edge(&mut edges, &mut edge_keys, &node_id, target_node);
+            } else {
+                pending_until.push((node_id.clone(), dep));
+            }
+        }
+
+        previous_task_end = end_day;
+        previous_task_id = Some(node_id);
+        first_task = false;
+    }
+
+    for (dependency_id, target_node_id) in pending_after {
+        if let Some(from_node_id) = logical_id_to_node.get(&dependency_id) {
+            push_gantt_edge(&mut edges, &mut edge_keys, from_node_id, &target_node_id);
+        }
+    }
+
+    for (from_node_id, dependency_id) in pending_until {
+        if let Some(to_node_id) = logical_id_to_node.get(&dependency_id) {
+            push_gantt_edge(&mut edges, &mut edge_keys, &from_node_id, to_node_id);
+        }
+    }
+
+    if nodes.is_empty() {
+        bail!("gantt diagram does not declare any tasks");
+    }
+
+    let sections = if top_subgraphs.is_empty() {
+        vec!["Tasks".to_string()]
+    } else {
+        top_subgraphs.iter().map(|s| s.label.clone()).collect()
+    };
+
+    Ok(Diagram {
+        kind: DiagramKind::Gantt(GanttData {
+            title,
+            date_format,
+            sections,
+            tasks: gantt_tasks,
+            original_source: original_source.to_string(),
+        }),
+        direction: Direction::LeftRight,
+        nodes,
+        order,
+        edges,
+        subgraphs: top_subgraphs
+            .into_iter()
+            .map(SubgraphBuilder::into_subgraph)
+            .collect(),
+        node_membership,
+    })
+}
+
+fn parse_gantt_timing_descriptors(
+    descriptors: &[String],
+) -> (Option<String>, Option<String>, Option<String>) {
+    let values: Vec<String> = descriptors
+        .iter()
+        .map(|segment| segment.trim())
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    match values.len() {
+        0 => (None, None, None),
+        1 => (None, None, Some(values[0].clone())),
+        2 => (None, Some(values[0].clone()), Some(values[1].clone())),
+        _ => (
+            Some(values[0].clone()),
+            Some(values[1].clone()),
+            Some(values[2].clone()),
+        ),
+    }
+}
+
+fn resolve_gantt_start_expr(
+    expr: &str,
+    date_format: &str,
+    fallback: f64,
+    known_ends: &HashMap<String, f64>,
+) -> Option<f64> {
+    if let Some(rest) = strip_prefix_case_insensitive(expr.trim(), "after") {
+        let mut latest: Option<f64> = None;
+        for dep in rest.split_whitespace() {
+            if let Some(end) = known_ends.get(dep) {
+                latest = Some(match latest {
+                    Some(current) => current.max(*end),
+                    None => *end,
+                });
+            }
+        }
+        return latest.or(Some(fallback));
+    }
+
+    parse_gantt_datetime(expr, date_format)
+}
+
+fn resolve_gantt_end_expr(
+    expr: &str,
+    date_format: &str,
+    start_day: f64,
+    known_starts: &HashMap<String, f64>,
+) -> Option<f64> {
+    let trimmed = expr.trim();
+
+    if let Some(rest) = strip_prefix_case_insensitive(trimmed, "until") {
+        let mut earliest: Option<f64> = None;
+        for dep in rest.split_whitespace() {
+            if let Some(start) = known_starts.get(dep) {
+                earliest = Some(match earliest {
+                    Some(current) => current.min(*start),
+                    None => *start,
+                });
+            }
+        }
+        return earliest;
+    }
+
+    if let Some(duration_days) = parse_gantt_duration_days(trimmed) {
+        return Some(start_day + duration_days.max(0.0));
+    }
+
+    parse_gantt_datetime(trimmed, date_format)
+}
+
+fn parse_gantt_datetime(value: &str, date_format: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if date_format.eq_ignore_ascii_case("YYYY-MM-DD") {
+        return parse_yyyy_mm_dd(trimmed);
+    }
+
+    if date_format.eq_ignore_ascii_case("HH:mm:ss") {
+        return parse_hh_mm_ss(trimmed);
+    }
+
+    if date_format.eq_ignore_ascii_case("x") {
+        return trimmed.parse::<f64>().ok().map(|ms| ms / 86_400_000.0);
+    }
+
+    if date_format.eq_ignore_ascii_case("X") {
+        return trimmed.parse::<f64>().ok().map(|s| s / 86_400.0);
+    }
+
+    if date_format.eq_ignore_ascii_case("D") {
+        return trimmed.parse::<f64>().ok();
+    }
+
+    if date_format.eq_ignore_ascii_case("ss") {
+        return trimmed.parse::<f64>().ok().map(|s| s / 86_400.0);
+    }
+
+    parse_yyyy_mm_dd(trimmed)
+}
+
+fn parse_yyyy_mm_dd(value: &str) -> Option<f64> {
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    Some(days_from_civil(year, month, day) as f64)
+}
+
+fn parse_hh_mm_ss(value: &str) -> Option<f64> {
+    let mut parts = value.split(':');
+    let h = parts.next()?.parse::<f64>().ok()?;
+    let m = parts.next()?.parse::<f64>().ok()?;
+    let s = parts.next()?.parse::<f64>().ok()?;
+    Some((h * 3600.0 + m * 60.0 + s) / 86_400.0)
+}
+
+fn parse_gantt_duration_days(value: &str) -> Option<f64> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    let units = [
+        ("millisecond", 1.0 / 86_400_000.0),
+        ("second", 1.0 / 86_400.0),
+        ("minute", 1.0 / 1_440.0),
+        ("hour", 1.0 / 24.0),
+        ("day", 1.0),
+        ("week", 7.0),
+        ("month", 30.0),
+        ("ms", 1.0 / 86_400_000.0),
+        ("s", 1.0 / 86_400.0),
+        ("m", 1.0 / 1_440.0),
+        ("h", 1.0 / 24.0),
+        ("d", 1.0),
+        ("w", 7.0),
+    ];
+
+    for (suffix, factor) in units {
+        if let Some(number) = trimmed.strip_suffix(suffix) {
+            if let Ok(parsed) = number.trim().parse::<f64>() {
+                return Some(parsed * factor);
+            }
+        }
+    }
+
+    None
+}
+
+fn format_gantt_day(day: f64, date_format: &str) -> String {
+    if date_format.eq_ignore_ascii_case("YYYY-MM-DD") {
+        let rounded = day.round() as i64;
+        let (year, month, day_of_month) = civil_from_days(rounded);
+        return format!("{year:04}-{month:02}-{day_of_month:02}");
+    }
+
+    if date_format.eq_ignore_ascii_case("HH:mm:ss") {
+        let seconds = (day.fract() * 86_400.0).round().max(0.0) as i64;
+        let h = (seconds / 3600) % 24;
+        let m = (seconds / 60) % 60;
+        return format!("{h:02}:{m:02}");
+    }
+
+    format!("{day:.2}")
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = year as i64 - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let d = day as i64;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
+
+fn parse_gantt_metadata(
+    descriptors: &[String],
+) -> (Option<String>, Vec<String>, Vec<String>, bool) {
+    let mut explicit_task_id: Option<String> = None;
+    let mut after_refs: Vec<String> = Vec::new();
+    let mut until_refs: Vec<String> = Vec::new();
+    let mut has_explicit_start = false;
+
+    for token in descriptors {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = strip_prefix_case_insensitive(trimmed, "after") {
+            has_explicit_start = true;
+            after_refs.extend(
+                rest.split_whitespace()
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string),
+            );
+            continue;
+        }
+
+        if let Some(rest) = strip_prefix_case_insensitive(trimmed, "until") {
+            until_refs.extend(
+                rest.split_whitespace()
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string),
+            );
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("after") {
+            has_explicit_start = true;
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("until") {
+            continue;
+        }
+
+        if looks_like_gantt_temporal_expression(trimmed) {
+            has_explicit_start = true;
+            continue;
+        }
+
+        if explicit_task_id.is_none() {
+            explicit_task_id = Some(trimmed.to_string());
+        }
+    }
+
+    (explicit_task_id, after_refs, until_refs, has_explicit_start)
+}
+
+fn strip_prefix_case_insensitive<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    if input.len() < prefix.len() {
+        return None;
+    }
+
+    let (head, tail) = input.split_at(prefix.len());
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+
+    let rest = tail.trim_start();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+fn looks_like_gantt_temporal_expression(token: &str) -> bool {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == ':' || ch == '/')
+    {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let duration_units = [
+        "millisecond",
+        "second",
+        "minute",
+        "hour",
+        "day",
+        "week",
+        "month",
+        "ms",
+        "s",
+        "m",
+        "h",
+        "d",
+        "w",
+    ];
+    if duration_units
+        .iter()
+        .any(|unit| lower.ends_with(unit) && lower[..lower.len() - unit.len()].trim().parse::<f32>().is_ok())
+    {
+        return true;
+    }
+
+    lower.contains('-') || lower.contains(':') || lower.contains('/')
+}
+
+fn make_unique_node_id(base: &str, nodes: &HashMap<String, Node>) -> String {
+    if !nodes.contains_key(base) {
+        return base.to_string();
+    }
+
+    let mut counter = 2_usize;
+    loop {
+        let candidate = format!("{}_{}", base, counter);
+        if !nodes.contains_key(&candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+fn push_gantt_edge(
+    edges: &mut Vec<Edge>,
+    edge_keys: &mut HashSet<(String, String)>,
+    from: &str,
+    to: &str,
+) {
+    if from == to {
+        return;
+    }
+
+    let key = (from.to_string(), to.to_string());
+    if !edge_keys.insert(key.clone()) {
+        return;
+    }
+
+    edges.push(Edge {
+        from: key.0,
+        to: key.1,
+        label: None,
+        kind: EdgeKind::Solid,
+        arrow: EdgeArrowDirection::Forward,
+    });
 }
 
 fn parse_subgraph_header(raw: &str) -> Result<(String, String)> {

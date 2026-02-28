@@ -220,6 +220,7 @@ impl ServeState {
                         },
                     );
                     Diagram {
+                        kind: DiagramKind::Flowchart,
                         direction: Direction::TopDown,
                         nodes,
                         order: vec!["dummy".to_string()],

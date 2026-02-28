@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1400" height="386" viewBox="0 0 1400 386" font-family="Inter, system-ui, sans-serif">
+  <rect width="100%" height="100%" fill="white" />
+  <text x="700.0" y="44" fill="#1a202c" font-size="40" font-weight="700" text-anchor="middle">A Gantt Diagram</text>
+  <rect x="0" y="90.0" width="1400.0" height="108.0" fill="#f1f5f9" />
+  <text x="16" y="144.0" fill="#1f2937" font-size="20" font-weight="600" dominant-baseline="middle">Section</text>
+  <rect x="0" y="198.0" width="1400.0" height="108.0" fill="#f1f5f9" />
+  <text x="16" y="252.0" fill="#1f2937" font-size="20" font-weight="600" dominant-baseline="middle">Another</text>
+  <line x1="160.0" y1="76.0" x2="160.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="160.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-01-01</text>
+  <line x1="310.0" y1="76.0" x2="310.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="310.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-01-07</text>
+  <line x1="460.0" y1="76.0" x2="460.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="460.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-01-14</text>
+  <line x1="610.0" y1="76.0" x2="610.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="610.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-01-20</text>
+  <line x1="760.0" y1="76.0" x2="760.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="760.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-01-26</text>
+  <line x1="910.0" y1="76.0" x2="910.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="910.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-02-01</text>
+  <line x1="1060.0" y1="76.0" x2="1060.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="1060.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-02-08</text>
+  <line x1="1210.0" y1="76.0" x2="1210.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="1210.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-02-14</text>
+  <line x1="1360.0" y1="76.0" x2="1360.0" y2="306.0" stroke="#cbd5e1" stroke-width="1" />
+  <text x="1360.0" y="338.0" fill="#64748b" font-size="16" text-anchor="middle">2014-02-20</text>
+  <rect x="160.0" y="100.0" width="720.0" height="34.0" rx="6" ry="6" fill="#6b7280" stroke="#f8fafc" stroke-width="2" />
+  <text x="520.0" y="117.0" fill="#f8fafc" font-size="16" text-anchor="middle" dominant-baseline="middle">A task</text>
+  <rect x="880.0" y="154.0" width="480.0" height="34.0" rx="6" ry="6" fill="#6b7280" stroke="#f8fafc" stroke-width="2" />
+  <text x="1120.0" y="171.0" fill="#f8fafc" font-size="16" text-anchor="middle" dominant-baseline="middle">Another task</text>
+  <rect x="424.0" y="208.0" width="288.0" height="34.0" rx="6" ry="6" fill="#6b7280" stroke="#f8fafc" stroke-width="2" />
+  <text x="568.0" y="225.0" fill="#f8fafc" font-size="16" text-anchor="middle" dominant-baseline="middle">Task in sec</text>
+  <rect x="712.0" y="262.0" width="576.0" height="34.0" rx="6" ry="6" fill="#6b7280" stroke="#f8fafc" stroke-width="2" />
+  <text x="1000.0" y="279.0" fill="#f8fafc" font-size="16" text-anchor="middle" dominant-baseline="middle">another task</text>
+</svg>
